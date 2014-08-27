@@ -1,0 +1,17 @@
+
+<interface>
+interface_verbosity = 2
+
+<post processing>
+postprocessing = True
+fitting_aware = False
+
+<output defaults>
+output_vtk = False
+output_pkl = False
+output_txt = False
+output_plt = False
+default_output_path = none
+
+<input_data>
+default_input_path = none
