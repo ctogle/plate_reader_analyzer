@@ -23,7 +23,10 @@ if __name__ == 'modular_pra.libplate_reader_analyzer':
 if __name__ == '__main__': print 'this is a library!'
 
 class data_block(lfu.modular_object_qt):
-	swaps = {'\xb0':' Deg '}
+	swaps = {
+            '\xb0':' Deg ',
+            '\r':'',
+                }
 	def __init__(self, *args, **kwargs):
 		self.raw = args[0]
 		lfu.modular_object_qt.__init__(self, *args, **kwargs)
@@ -42,9 +45,11 @@ class data_block(lfu.modular_object_qt):
 class header_block(data_block):
 	def __init__(self, *args, **kwargs):
 		blks = args[0]
-		try:
-			raw = blks[0].raw + blks[1].raw + blks[2].raw
-		except IndexError: pdb.set_trace()
+		#try:
+		#	raw = blks[0].raw + blks[1].raw + blks[2].raw
+		#except IndexError: pdb.set_trace()
+                raw = []
+                for bl in blks: raw += bl.raw#THIS WILL BE STUPID SLOW...
 		data_block.__init__(self, raw, **kwargs)
 	def _read_(self):
 		read = OrderedDict()
@@ -56,7 +61,9 @@ class header_block(data_block):
 class procedure_block(data_block):
 	def __init__(self, *args, **kwargs):
 		blks = args[0]
-		raw = blks[0].raw + blks[1].raw
+		#raw = blks[0].raw + blks[1].raw
+                raw = []
+                for bl in blks: raw += bl.raw#THIS WILL BE STUPID SLOW...
 		data_block.__init__(self, raw, **kwargs)
 	def _read_(self):
 		read = OrderedDict()
@@ -116,7 +123,8 @@ class obs_data_block(data_block):
 		meas = self.swap_check(self.raw[0])
 		self._measurement_ = meas
 		layout = self.swap_check(self.raw[1]).split(meas)
-		wells = layout[1].replace(',', '',1).split(',')
+                try:wells = layout[1].replace(',', '',1).split(',')
+                except:pdb.set_trace()
 		well_count = len(wells)
 		self._well_key_ = wells
 		conds = layout[0].split(',')
@@ -148,7 +156,11 @@ class obs_data_block(data_block):
 			checked =\
 				['1000000.0' if x.count('OVRFLW') else x for x in unic]
 			return checked
+                def back_r_swap(unic):
+                        checked = [x.replace('\r', '') for x in unic]
+                        return checked
 		def _all_checks_(unic):
+                        unic = back_r_swap(unic)
 			unic = empty_check(unic)
 			checked = ovrflw_check(unic)
 			return checked
@@ -487,18 +499,14 @@ class data_pool(data_block):
 class plate_reader_analyzer(lfu.modular_object_qt):
 
 	def __init__(self, *args, **kwargs):
-		self.impose_default('parsed_data',lfu.data_container(),**kwargs)			# TO EXPEDITE TESTING!!
-		self.impose_default('input_data_file','051214_P2R2.txt',**kwargs)			# TO EXPEDITE TESTING!!
-		self.impose_default('input_tmpl_file','061114 template for calc.txt',**kwargs)			# TO EXPEDITE TESTING!!
-		#self.impose_default('input_data_file','',**kwargs)
-		#self.impose_default('input_tmpl_file','',**kwargs)
+		self.impose_default('parsed_data',lfu.data_container(),**kwargs)
 		self.settings_manager = lset.settings_manager(parent = self, 
 		    	filename = 'plate_reader_analyzer_settings.txt')
 		self.settings = self.settings_manager.read_settings()
-		in_pa = lset.get_setting('default_input_path')
-		if in_pa and not os.path.exists(in_pa): in_pa = os.getcwd()
-		self.impose_default('input_data_directory',in_pa,**kwargs)
-		self.impose_default('input_temp_directory',in_pa,**kwargs)
+		in_dat = lset.get_setting('default_input_data')
+		in_tmp = lset.get_setting('default_input_template')
+		self.impose_default('input_data_file',in_dat,**kwargs)
+		self.impose_default('input_tmpl_file',in_tmp,**kwargs)
 		self.current_tab_index = 0
 		self.current_tab_index_outputs = 0
 		self.postprocess_plan = lpp.post_process_plan(
@@ -513,9 +521,10 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 
 	def parse_template(self):
 		#inp_path = lset.get_setting('default_input_path')
-		inp_path = self.input_temp_directory
-		fipath = os.path.join(inp_path, self.input_tmpl_file)
-		if not os.path.isfile(fipath):
+		#inp_path = self.input_temp_directory
+		#fipath = os.path.join(inp_path, self.input_tmpl_file)
+		fipath = self.input_tmpl_file
+                if not os.path.isfile(fipath):
 			print 'cannot find template file:', self.input_tmpl_file
 			return
 		with open(fipath, 'r') as handle: lines = handle.readlines()
@@ -549,8 +558,9 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 			[bl_objs.append(data_block(bl)) for bl in blocks if bl]
 			return bl_objs
 
-		inp_path = self.input_data_directory
-		fipath = os.path.join(inp_path, self.input_data_file)
+		#inp_path = self.input_data_directory
+		#fipath = os.path.join(inp_path, self.input_data_file)
+		fipath = self.input_data_file
 		if not os.path.isfile(fipath):
 			print 'cannot find data file:', self.input_data_file
 			return
@@ -614,50 +624,34 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 
 	def make_tab_book_pages(self, *args, **kwargs):
 		window = args[0]
-		if self.input_data_directory:
-			inpt_dir = self.input_data_directory
-		else: inpt_dir = os.getcwd()
+		inpt_dir = os.getcwd()
 		front_page = lgm.interface_template_gui(
-				panel_position = (0, 0), 
-				widgets = ['directory_name_box'], 
-				layout = 'vertical', 
-				keys = [['input_data_directory']], 
-				instances = [[self]], 
-				initials = [[self.input_data_directory, 
-							None, inpt_dir]], 
-				labels = [['Choose Input Directory']], 
-				box_labels = ['Input Data Directory'])
-		front_page += lgm.interface_template_gui(
-				widgets = ['directory_name_box'], 
-				layout = 'vertical', 
-				keys = [['input_temp_directory']], 
-				instances = [[self]], 
-				initials = [[self.input_temp_directory, 
-							None, inpt_dir]], 
-				labels = [['Choose Input Directory']], 
-				box_labels = ['Input Template Directory'])
-		front_page += lgm.interface_template_gui(
 				widgets = ['file_name_box'], 
-				layout = 'horizontal', 
+				layout = 'grid', 
+                                widg_positions = [(1,0)],
 				keys = [['input_data_file']], 
 				instances = [[self]], 
+                                maximum_sizes = [[(50, 200)]], 
 				initials = [[self.input_data_file, 
 					'Possible Inputs (*.txt)', 
 					inpt_dir]], 
 				labels = [['Choose Filename']], 
 				box_labels = ['Input Data File'])
-		front_page += lgm.interface_template_gui(
+		front_page += lgm.interface_template_gui( 
+                                widg_positions = [(2,0)],
 				widgets = ['file_name_box'], 
-				keys = [['input_data_file']], 
+				keys = [['input_tmpl_file']], 
 				instances = [[self]], 
+                                maximum_sizes = [[(50, 200)]], 
 				initials = [[self.input_tmpl_file, 
-					'Possible Inputs (*.txt)', 
+			        	'Possible Inputs (*.txt)', 
 					inpt_dir]], 
 				labels = [['Choose Filename']], 
 				box_labels = ['Input Template File'])
 		front_page += lgm.interface_template_gui(
+                                widg_positions = [(0,0)], 
 				widgets = ['button_set'], 
-				layouts = ['vertical'], 
+				layouts = ['horizontal'], 
 				bindings = [[lgb.create_reset_widgets_wrapper(
 						window, self.parse_inputs), 
 					self.analyze_data, self.produce_output]], 
