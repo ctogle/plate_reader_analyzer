@@ -34,7 +34,7 @@ def ignore_res(f):
 res_dir = 'modular_pra/resources/'
 res_fis = [f for f in os.listdir(os.path.join(
 	os.getcwd(), 'modular_pra', 'resources')) 
-						if not ignore_res(f)]
+			if not ignore_res(f)]
 res_files = [res_dir + f for f in res_fis]
 
 requirements = [
@@ -47,7 +47,7 @@ setup(
 	description = "modular plate reader pkg",
 	author = "ctogle",
 	author_email = "cogle@vt.edu",
-	url = "http://github.com/ctogle/modular_plate_reader_analyzer",
+	url = "http://github.com/ctogle/plate_reader_analyzer",
 	license = "MIT License",
 	long_description =
 """\
@@ -59,6 +59,6 @@ This is the plate reader analyzer package of modular
 	py_modules = core_modules, 
 	zip_safe = False,
 	data_files=[(os.path.join(appdirs.user_config_dir(), 
-						'modular_resources'), res_files)], 
+		    'modular_resources'), res_files)], 
 	)
 

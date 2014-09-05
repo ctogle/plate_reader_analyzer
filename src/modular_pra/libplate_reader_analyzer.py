@@ -1,6 +1,7 @@
 import modular_core.libfundamental as lfu
 import modular_core.libsettings as lset
 import modular_core.liboutput as lo
+import modular_core.libmath as lm
 #import modular_core.libgeometry as lgeo
 import modular_core.libdatacontrol as ldc
 import modular_core.libpostprocess as lpp
@@ -38,9 +39,12 @@ class data_block(lfu.modular_object_qt):
 		self.read = args[0]
 		#self.display_read()
 	def swap_check(self, li):
-		swaps = self.swaps
-		for sw in swaps.keys(): li = li.replace(sw, swaps[sw])
-		return li
+		return swap_check(self.swaps, li)
+
+def swap_check(swaps, li):
+    for sw in swaps.keys():
+        li = li.replace(sw, swaps[sw])
+    return li
 
 class header_block(data_block):
 	def __init__(self, *args, **kwargs):
@@ -51,7 +55,7 @@ class header_block(data_block):
                 raw = []
                 for bl in blks: raw += bl.raw#THIS WILL BE STUPID SLOW...
 		data_block.__init__(self, raw, **kwargs)
-	def _read_(self):
+	def _read_(self, pra):
 		read = OrderedDict()
 		for li in self.raw:
 			ke = li[:li.find(',')].replace(':','')
@@ -65,7 +69,7 @@ class procedure_block(data_block):
                 raw = []
                 for bl in blks: raw += bl.raw#THIS WILL BE STUPID SLOW...
 		data_block.__init__(self, raw, **kwargs)
-	def _read_(self):
+	def _read_(self, pra):
 		read = OrderedDict()
 		relev = self.raw[1:]
 		kins = []; kin_on = False
@@ -91,7 +95,7 @@ class layout_block(data_block):
 		raw = args[0].raw
 		data_block.__init__(self, raw, **kwargs)
 
-	def _read_(self):
+	def _read_(self, pra):
 		sps = [r.split(',') for r in self.raw[2:]]
 		rows = len(sps)
 		cols = len(sps[1])-1
@@ -109,6 +113,8 @@ class obs_data_block(data_block):
 	def __init__(self, *args, **kwargs):
 		self.impose_default('capture_targets',[],**kwargs)
 		self.impose_default('replicate_reduced',False,**kwargs)
+		self.impose_default('timept_filtered',False,**kwargs)
+                self.impose_default('blank_well_filter_std_factor',5,**kwargs)
 		blks = args[0]
 		raw = blks[0].raw + blks[1].raw
 		data_block.__init__(self, *(raw,), **kwargs)
@@ -119,7 +125,7 @@ class obs_data_block(data_block):
 		self._children_ = [self.output]
 		self.output.output_plt = False
 
-	def _read_(self):
+	def _read_(self, pra):
 		meas = self.swap_check(self.raw[0])
 		self._measurement_ = meas
 		layout = self.swap_check(self.raw[1]).split(meas)
@@ -134,10 +140,16 @@ class obs_data_block(data_block):
 		meas_count = len(data_lines)
 		_cond_data_ = np.ndarray((meas_count,cond_count),dtype=object)
 		_well_data_ = np.ndarray((meas_count,well_count),dtype=object)
+                self.well_mobjs = {}
+                self.cond_mobjs = {}
 		for re_dex, re in enumerate(data_lines):
-			sp = re.split(',')
+		        sp = re.split(',')
 			_cond_data_[re_dex,:] = sp[:cond_count]
 			_well_data_[re_dex,:] = sp[cond_count:]
+                for codex, cond in enumerate(self._cond_key_):
+                        self.cond_mobjs[cond] = cond_data(cond)
+                for wedex, well in enumerate(self._well_key_):
+                        self.well_mobjs[well] = well_data(well)
 		self._cond_data_ = _cond_data_
 		self._well_data_ = _well_data_
 		read = OrderedDict()
@@ -146,9 +158,11 @@ class obs_data_block(data_block):
 		read['condition_data'] = self._cond_data_
 		read['wells_key'] = self._well_key_
 		read['wells_data'] = self._well_data_
+	        read['well_mobjs'] = self.well_mobjs
+	        read['cond_mobjs'] = self.cond_mobjs
 		data_block._read_(self, read)
 
-	def deep_parse(self, *args, **kwargs):
+	def deep_parse(self, pra):
 		def empty_check(unic):
 			checked = [x for x in unic if not x == '']
 			return checked
@@ -191,22 +205,86 @@ class obs_data_block(data_block):
 		welkey = self._well_key_
 		condat = self._cond_data_
 		conkey = self._cond_key_
-		con_data = ldc.scalars_from_labels(conkey)
+                all_data = []
+		#con_data = ldc.scalars_from_labels(conkey)
 		for dex, key in enumerate(conkey):
-			con_data[dex].scalars = filter_(key, condat[:,dex])
-		wel_data = ldc.scalars_from_labels(welkey)
+                        new = ldc.scalars(label = key, 
+                            scalars = filter_(key, condat[:,dex]))
+                        self.cond_mobjs[key].data = new
+                        self.cond_mobjs[key].process()
+                        all_data.append(new)
+			#con_data[dex].scalars = filter_(key, condat[:,dex])
+		#wel_data = ldc.scalars_from_labels(welkey)
 		for dex, key in enumerate(welkey):
-			wel_data[dex].scalars = filter_(key, weldat[:,dex])
-		all_data = con_data + wel_data
+                        new = ldc.scalars(label = key, 
+                            scalars = filter_(key, weldat[:,dex]))
+                        self.well_mobjs[key].data = new
+                        self.well_mobjs[key].process()
+                        all_data.append(new)
+			#wel_data[dex].scalars = filter_(key, weldat[:,dex])
 		self._unreduced_ = lfu.data_container(data = all_data)
-		self._reduced_ = self.apply_reduction(self._unreduced_.data)
-		self.update_replicate_reduction()
+                #self.data = self._unreduced_
+		self.apply_reductions()
+                #self._reduced_ = self.apply_reduction(self._unreduced_.data)
+		#self.update_replicate_reduction()
+                blanks = lfu.uniqfy(pra.template_read['Blank Well'])
+                if not len(blanks) == 1:
+                    print 'blank wells should not change identity!!'
+                    pdb.set_trace()
+                self.blank_well_filter(pra, blanks)
 
-	def apply_reduction(self, unred):
+        def blank_well_filter(self, pra, blanks):
+
+            def outlier(val,mean,std):
+                stdthresh = self.blank_well_filter_std_factor*std
+                out = abs(val - mean) > stdthresh
+                return out
+
+            spl = blanks[0].split(' ')
+            rng = lm.make_range(spl[1])[0].split(',')
+            #_unred_ = self._unreduced_.data
+            blanks = [''.join([spl[0], str(int(float(r)))]) for r in rng]
+            blank_wells = [self.well_mobjs[ke] for ke in blanks]
+            if not blank_wells:
+                print 'NO BLANK WELL DATA IDENTIFIED!!'
+                pdb.set_trace()
+            means = [d.mean for d in blank_wells]
+            stddevs = [d.stdv for d in blank_wells]
+            dcount = len(blank_wells[0].data.scalars)
+
+            flags = [[None]*len(blank_wells)]*dcount
+            for fldx in xrange(dcount):
+                pool = [d.data.scalars[fldx] for d in blank_wells]
+                flags[fldx] = [outlier(p,mean,std) for 
+                    p,mean,std in zip(pool,means,stddevs)]
+
+            timept_flags = []
+            bground_values = []
+            for fdx, flgs in enumerate(flags):
+                bground_values.extend(
+                    [d.data.scalars[fdx] for d,fl in 
+                        zip(blank_wells,flgs) if not fl])
+                if flgs.count(True) >= 2:timept_flags.append(fdx)
+            if not bground_values:
+                print 'NO BLANK WELLS FOUND ACCEPTABLE!!'
+                pdb.set_trace()
+            self.bground_noise = np.mean(bground_values)
+            self.flagged_timepts = timept_flags
+
+        def apply_timept_flags(self, unred):
+            _filtered_ = []
+            for d in unred.data:
+                subd = [d.scalars[vdx] for vdx in xrange(len(d.scalars)) 
+                        if not vdx in self.flagged_timepts]
+                filt = ldc.scalars(label = d.label, scalars = subd)
+                _filtered_.append(filt)
+            return lfu.data_container(data = _filtered_)
+
+	def apply_replicate_reduction(self, unred):
 		read = self.parent.parent.read['layout'].read
 		flat = lfu.flatten(read['table'])
 		well_cnt = len(flat)
-		reduced = unred[:len(unred)-well_cnt]	#list of replicate averaged scalers
+		reduced = unred.data[:len(unred.data)-well_cnt]	#list of replicate averaged scalers
 		con_offset = len(reduced)
 		uniq = lfu.uniqfy(flat)
 		layout = OrderedDict()
@@ -216,22 +294,23 @@ class obs_data_block(data_block):
 		new = ldc.scalars_from_labels(layout.keys())
 		for ndex, key in enumerate(layout.keys()):
 			rel_dexes = layout[key]
-			rel_dater = [unred[d] for d in rel_dexes]
+			rel_dater = [unred.data[d] for d in rel_dexes]
+			#rel_dater = [unred[d] for d in rel_dexes]
 			zi = zip(*[r.scalars for r in rel_dater])
 			new[ndex].scalars = np.array([np.mean(z) for z in zi])
 		reduced.extend(new)
 		red = lfu.data_container(data = reduced)
 		return red
 
-	def _toggle_replication_reduced_(self):
-		self.replicate_reduced = not self.replicate_reduced
-		self.update_replicate_reduction(self)
-
-	def update_replicate_reduction(self):
-		if self.replicate_reduced: self.data = self._reduced_
-		else: self.data = self._unreduced_
-		self.capture_targets = [x.label for x in self.data.data]
-		self.output.rewidget(True)
+        def apply_reductions(self):
+            unred = self._unreduced_
+            if self.replicate_reduced:
+                unred = self.apply_replicate_reduction(unred)
+            if self.timept_filtered:
+                unred = self.apply_timept_flags(unred)
+            self.data = unred
+            self.capture_targets = [x.label for x in self.data.data]
+            self.output.rewidget(True)
 
 	def provide_axes_manager_input(self, 
 			lp = True, cp = False, bp = False, 
@@ -252,16 +331,66 @@ class obs_data_block(data_block):
 				widgets = ['check_set'], 
 				labels = [['Apply Replicate Reduction']], 
 				append_instead = [False], 
+                                #refresh = [[True]], 
+                                #window = [[window]], 
 				instances = [[self]], 
 				keys = [['replicate_reduced']], 
 				callbacks = [[lgb.create_reset_widgets_wrapper(
-					window, self.update_replicate_reduction)]]))
+				    window, self.apply_reductions)]]))
+		self.widg_templates.append(                     
+			lgm.interface_template_gui(
+				widgets = ['check_set'], 
+				labels = [['Apply Outlier Reduction']], 
+				append_instead = [False], 
+                                #refresh = [[True]], 
+                                #window = [[window]], 
+				instances = [[self]], 
+				keys = [['timept_filtered']], 
+				callbacks = [[lgb.create_reset_widgets_wrapper(
+			            window, self.apply_reductions)]]))
 		lfu.modular_object_qt.set_settables(
 			self, *args, from_sub = True)
 
+class cond_data(object):
+	def __init__(self, *args, **kwargs):
+		self.cond_id = args[0]
+
+        def process(self):
+            self.mean = np.mean(self.data.scalars)
+            self.stdv = np.std(self.data.scalars)
+
+	def get_single_well_data(self, od_dex):
+		# THIS FUNCTION WILL JUST RETURN THE SELECTED WELLS PLOT DATA
+		#od_dex = self.get_selected_well()
+		time_ = self.data.data[0]
+		od = self.data.data[od_dex]
+		dbl = self._doubling_times_[od_dex]
+		gro = self._growth_rates_[od_dex]
+		lo, hi = self._thresholds_[od_dex]
+		#od.scalars = od.scalars
+		y_low = ldc.scalars('__skip__', [lo]*2, color = 'black')
+		#	[self.OD_threshold_low]*2, color = 'black')
+		y_high = ldc.scalars('__skip__', [hi]*2, color = 'black')
+		#	[self.OD_threshold_high]*2, color = 'black')
+		x_stack = ldc.scalars('__skip__', 
+			[time_.scalars.min(), time_.scalars.max()])
+		# CALCULATE THE DOUBLING TIME AND ADD VERTICAL LINES FOR THE POINTS USED
+		#  MAKE ALL THESE FLAT LINES DASHED OR SOMETHING
+		#pdb.set_trace()
+		data = lfu.data_container(
+			domains = [time_, x_stack, x_stack], 
+			codomains = [od, y_low, y_high], 
+			doubling = dbl, growth_rate = gro, 
+						thresholds = (lo, hi))
+		return data
+
 class well_data(object):
 	def __init__(self, *args, **kwargs):
-		pass
+		self.well_id = args[0]
+
+        def process(self):
+            self.mean = np.mean(self.data.scalars)
+            self.stdv = np.std(self.data.scalars)
 
 	def doubling(self, lo, hi, vals, t):
 		#vals = np.log(dat.scalars)
@@ -281,9 +410,9 @@ class well_data(object):
 		try: return np.log(2.0)/dbl
 		except FloatingPointError: return None
 
-	def get_single_well_data(self):
+	def get_single_well_data(self, od_dex):
 		# THIS FUNCTION WILL JUST RETURN THE SELECTED WELLS PLOT DATA
-		od_dex = self.get_selected_well()
+		#od_dex = self.get_selected_well()
 		time_ = self.data.data[0]
 		od = self.data.data[od_dex]
 		dbl = self._doubling_times_[od_dex]
@@ -333,8 +462,8 @@ class optical_density_block(obs_data_block):
 		try: return np.log(2.0)/dbl
 		except FloatingPointError: return None
 
-	def deep_parse(self):
-		obs_data_block.deep_parse(self)
+	def deep_parse(self, pra):
+		obs_data_block.deep_parse(self, pra)
 		_unred_ = self._unreduced_.data
 		ti = _unred_[0]
 		low = self.OD_threshold_low
@@ -345,7 +474,7 @@ class optical_density_block(obs_data_block):
 			[(low,high)]*len(_unred_[cond_cnt:])
 		self._doubling_times_ = nones +\
 			[self.doubling(low,high,np.log(unred.scalars),ti) for 
-									unred in _unred_[cond_cnt:]]
+				unred in _unred_[cond_cnt:]]
 		self._growth_rates_ = nones +\
 			[self.growth(dbl, dex) for dex, dbl in 
 				enumerate(self._doubling_times_[cond_cnt:])]
@@ -358,9 +487,9 @@ class optical_density_block(obs_data_block):
 		cond_cnt = len(self._cond_key_)
 		return od_dex + cond_cnt
 
-	def get_single_well_data(self):
+	def get_single_well_data(self, od_dex):
 		# THIS FUNCTION WILL JUST RETURN THE SELECTED WELLS PLOT DATA
-		od_dex = self.get_selected_well()
+		#od_dex = self.get_selected_well()
 		time_ = self.data.data[0]
 		od = self.data.data[od_dex]
 		dbl = self._doubling_times_[od_dex]
@@ -414,8 +543,8 @@ class optical_density_block(obs_data_block):
 		# NEED A BUTTON TO RECALCULATE THAT WELLS DOUBLING TIME USING THAT WELLS THRESHOLDS
 		# BUT THE INITIAL DOUBLING TIMES AND THRESHOLDS MUST BE SET AT DEEP_PARSE TIME
 		
-		data = self.get_single_well_data()
 		od_dex = self.get_selected_well()
+		data = self.get_single_well_data(od_dex)
 		lo, hi = self._thresholds_[od_dex]
 
 		od_thresh = lgm.interface_template_gui(
@@ -464,9 +593,9 @@ class optical_density_block(obs_data_block):
 				layout = 'horizontal', 
 				templates = [[dbl_time, od_thresh]], 
 				box_labels = ['Doubling Time Measurement'])
-		dbl_meas_template += lgm.interface_template_gui(
-				widgets = ['plot'], 
-				datas = [data])
+		#dbl_meas_template += lgm.interface_template_gui(
+		#		widgets = ['plot'], 
+		#		datas = [data])
 		self.widg_templates.append(dbl_meas_template)
 
 		self.widg_templates.append(
@@ -489,10 +618,10 @@ class data_pool(data_block):
 		value.parent = self
 		self.data.append(value)
 		self._children_ = self.data
-	def _read_(self):
-		for bl in self.data: bl._read_()
-	def deep_parse(self):
-		for bl in self.data: bl.deep_parse()
+	def _read_(self, *args, **kwargs):
+		for bl in self.data: bl._read_(*args, **kwargs)
+	def deep_parse(self, *args, **kwargs):
+		for bl in self.data: bl.deep_parse(*args, **kwargs)
 	def get_targets(self):
 		return [bl.label for bl in self.data]
 
@@ -520,9 +649,6 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		self.parse_data()
 
 	def parse_template(self):
-		#inp_path = lset.get_setting('default_input_path')
-		#inp_path = self.input_temp_directory
-		#fipath = os.path.join(inp_path, self.input_tmpl_file)
 		fipath = self.input_tmpl_file
                 if not os.path.isfile(fipath):
 			print 'cannot find template file:', self.input_tmpl_file
@@ -558,8 +684,6 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 			[bl_objs.append(data_block(bl)) for bl in blocks if bl]
 			return bl_objs
 
-		#inp_path = self.input_data_directory
-		#fipath = os.path.join(inp_path, self.input_data_file)
 		fipath = self.input_data_file
 		if not os.path.isfile(fipath):
 			print 'cannot find data file:', self.input_data_file
@@ -578,8 +702,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		_OD_lam = 600
 		_OD_label = str(_OD_lam)+'nm:'+str(_OD)
 
-		for pair in zip(obs_heads, obs_data):
-			bl_label = pair[0].raw[0]
+                for pair in zip(obs_heads, obs_data):
+                        bl_label = swap_check(data_block.swaps, pair[0].raw[0])
 			if bl_label == _OD_label:
 				data.append(optical_density_block(
 						pair, label = bl_label))
@@ -590,8 +714,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		self.read['procedure'] = procedure
 		self.read['layout'] = layout
 		self.read['data'] = data
-		for key in self.read.keys(): self.read[key]._read_()
-		self.read['data'].deep_parse()
+		for key in self.read.keys(): self.read[key]._read_(self)
+		self.read['data'].deep_parse(self)
 		daters = self.read['data'].get_targets()
 		self.postprocess_plan._always_sourceable_ = daters
 		self.postprocess_plan.rewidget(True)
