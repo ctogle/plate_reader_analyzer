@@ -9,7 +9,9 @@ import modular_core.libpostprocess as lpp
 
 from collections import OrderedDict
 import numpy as np
+from scipy.optimize import curve_fit as cufit
 
+from copy import deepcopy as dcopy
 import os, sys, time, traceback
 import pdb
 
@@ -111,10 +113,19 @@ class obs_data_block(data_block):
 	_modu_program_ = 'plate_reader_analyzer'
 
 	def __init__(self, *args, **kwargs):
+                self.impose_default('is_OD_block', False, **kwargs)
 		self.impose_default('capture_targets',[],**kwargs)
 		self.impose_default('replicate_reduced',False,**kwargs)
+		self.impose_default('normalized_reduced',False,**kwargs)
 		self.impose_default('timept_filtered',False,**kwargs)
+		self.impose_default('timept_filtered_OD',False,**kwargs)
+		self.impose_default('background_subtracted',False,**kwargs)
                 self.impose_default('blank_well_filter_std_factor',5,**kwargs)
+                self.impose_default('fake_zero_value',0.000000001,**kwargs)
+		self.impose_default('phase_reduced', False, **kwargs)
+                self.impose_default('phase_type', 'Log', **kwargs) 
+                self.impose_default('override_domains_with_OD', False, **kwargs)
+                self.impose_default('override_thresholds', False, **kwargs)
 		blks = args[0]
 		raw = blks[0].raw + blks[1].raw
 		data_block.__init__(self, *(raw,), **kwargs)
@@ -148,8 +159,16 @@ class obs_data_block(data_block):
 			_well_data_[re_dex,:] = sp[cond_count:]
                 for codex, cond in enumerate(self._cond_key_):
                         self.cond_mobjs[cond] = cond_data(cond)
+                if self.is_OD_block:
+                    lo = self.OD_threshold_low
+                    mi = self.OD_threshold_middle
+                    hi = self.OD_threshold_high
+                else: lo,mi,hi = None, None, None
                 for wedex, well in enumerate(self._well_key_):
-                        self.well_mobjs[well] = well_data(well)
+                        self.well_mobjs[well] =\
+                            well_data(well, od_data = self.is_OD_block, 
+                                lo_thresh = lo, mi_thresh = mi, hi_thresh = hi, 
+                                parent = self)
 		self._cond_data_ = _cond_data_
 		self._well_data_ = _well_data_
 		read = OrderedDict()
@@ -192,7 +211,7 @@ class obs_data_block(data_block):
 			mins = hms_to_mins(hms)
 			return mins
 		known_filters = OrderedDict()
-		known_filters['Time'] = time_filter
+		#known_filters['Time'] = time_filter
 		known_filters['_all_'] = _all_checks_
 		def filter_(key, dat):
 			kf = known_filters
@@ -215,14 +234,16 @@ class obs_data_block(data_block):
                         all_data.append(new)
 			#con_data[dex].scalars = filter_(key, condat[:,dex])
 		#wel_data = ldc.scalars_from_labels(welkey)
+                timedata = self.cond_mobjs['Time'].data
 		for dex, key in enumerate(welkey):
                         new = ldc.scalars(label = key, 
                             scalars = filter_(key, weldat[:,dex]))
                         self.well_mobjs[key].data = new
-                        self.well_mobjs[key].process()
+                        self.well_mobjs[key].process(timedata)
                         all_data.append(new)
 			#wel_data[dex].scalars = filter_(key, weldat[:,dex])
-		self._unreduced_ = lfu.data_container(data = all_data)
+                self._unreduced_ = lfu.data_container(data = all_data[:])
+                self._all_data_ = all_data
                 #self.data = self._unreduced_
 		self.apply_reductions()
                 #self._reduced_ = self.apply_reduction(self._unreduced_.data)
@@ -271,15 +292,60 @@ class obs_data_block(data_block):
             self.bground_noise = np.mean(bground_values)
             self.flagged_timepts = timept_flags
 
+        def apply_normalization_RFU(self, unred):
+            if self.is_OD_block: return unred
+            OD_block = self.parent.get_OD_block()
+            od_data = OD_block.data
+            for d, odb in zip(unred.data, od_data.data):
+                if d.label in self._well_key_:
+                    subd = [x/y for x,y in zip(d.scalars,odb.scalars)] 
+                    d.scalars = np.array(subd)
+                else: pass
+                #else: d.scalars = odb.scalars[:]
+            return unred
+
+        def apply_versus_od_reduction(self, unred):
+            od_block = self.parent.get_OD_block()
+            od_data = lfu.data_container(data = dcopy(od_block._all_data_))
+            od_data = od_block.reduce_data(od_data,False, 
+                self.timept_filtered, self.background_subtracted, 
+                self.phase_reduced, self.replicate_reduced, 
+                False, False)
+
+            for d,dod in zip(unred.data,od_data.data):
+                if d.label in self._well_key_:
+                    d.override_domain = True
+                    d.domain = dod.scalars
+                    if len(d.domain) != len(d.scalars):
+                        pdb.set_trace()
+            return unred
+
+        def apply_timept_flags_OD(self, unred):
+            if self.is_OD_block: return unred
+            OD_block = self.parent.get_OD_block()
+            flagged_timepts = OD_block.flagged_timepts
+            #_filtered_ = []      
+            for d in unred.data:
+                subd = [d.scalars[vdx] for vdx in xrange(len(d.scalars)) 
+                        if not vdx in flagged_timepts]
+                d.scalars = subd
+                #filt = ldc.scalars(label = d.label, scalars = subd)
+                #_filtered_.append(filt)
+            #return lfu.data_container(data = _filtered_)
+            return unred
+
         def apply_timept_flags(self, unred):
-            _filtered_ = []
+            #_filtered_ = []
             for d in unred.data:
                 subd = [d.scalars[vdx] for vdx in xrange(len(d.scalars)) 
                         if not vdx in self.flagged_timepts]
-                filt = ldc.scalars(label = d.label, scalars = subd)
-                _filtered_.append(filt)
-            return lfu.data_container(data = _filtered_)
+                d.scalars = subd
+                #filt = ldc.scalars(label = d.label, scalars = subd)
+                #_filtered_.append(filt)
+            return unred
+            #return lfu.data_container(data = _filtered_)
 
+        #consider broken!
 	def apply_replicate_reduction(self, unred):
 		read = self.parent.parent.read['layout'].read
 		flat = lfu.flatten(read['table'])
@@ -302,22 +368,119 @@ class obs_data_block(data_block):
 		red = lfu.data_container(data = reduced)
 		return red
 
-        def apply_reductions(self):
-            unred = self._unreduced_
-            if self.replicate_reduced:
-                unred = self.apply_replicate_reduction(unred)
-            if self.timept_filtered:
+        def apply_background_subtraction(self, unred):
+            def smart_subtract(val):
+                if val < 0.0: return self.fake_zero_value
+                return val
+            #_filtered_ = []
+            bg = self.bground_noise
+            print 'background', bg
+            for d in unred.data:
+                if d.label in self._well_key_:
+                    subd = np.array([smart_subtract(v - bg) for v in d.scalars])
+                    d.scalars = subd
+                #filt = ldc.scalars(label = d.label, scalars = subd)
+                #_filtered_.append(filt)
+            #return lfu.data_container(data = _filtered_)
+            return unred
+
+        def apply_phase_reduction(self, unred):
+            od_block = self.parent.get_OD_block()
+            lo_thresh = od_block.OD_threshold_low
+            mi_thresh = od_block.OD_threshold_middle
+            hi_thresh = od_block.OD_threshold_high
+            lo_dex,mi_dex,hi_dex =\
+                od_block.get_lo_hi_threshold_indexes(
+                    lo_thresh, mi_thresh, hi_thresh)
+            if self.phase_type == 'Lag':
+                start = 0
+                stop = lo_dex
+            elif self.phase_type == 'Log':
+                start = lo_dex
+                stop = mi_dex
+            elif self.phase_type == 'Stationary':
+                start = mi_dex
+                stop = hi_dex
+            elif self.phase_type == 'Death':
+                start = hi_dex
+                stop = None
+            else:
+                print 'UNKNOWN PHASE TYPE CHOICE', self.phase_type
+                return unred
+            #filtered = []
+            for d in unred.data:
+                subd = d.scalars[start:stop]
+                d.scalars = subd
+                #filt = ldc.scalars(label = d.label, scalars = subd)
+                #filtered.append(filt)
+            return unred
+            #return lfu.data_container(data = filtered)
+
+        def reduce_data(self, unred, tf_od_f, tf_f, 
+                bgs_f, phr_f, rred_f, nred_f, domo_f):
+            unredtot = len(unred.data[0].scalars)/100.0
+            if tf_od_f:
+                unredlen = len(unred.data[0].scalars)
+                unred = self.apply_timept_flags_OD(unred)
+                unredlenpost = len(unred.data[0].scalars)
+                self.tf_od_f_cutout = (unredlen - unredlenpost) / unredtot
+            else: self.tf_od_f_cutout = 0.0
+            if tf_f:
+                unredlen = len(unred.data[0].scalars)
                 unred = self.apply_timept_flags(unred)
+                unredlenpost = len(unred.data[0].scalars)
+                self.tf_f_cutout = (unredlen - unredlenpost) / unredtot
+            else: self.tf_f_cutout = 0.0
+            if bgs_f:
+                #unredlen = len(unred.data[0].scalars)
+                unred = self.apply_background_subtraction(unred)
+                #unredlenpost = len(unred.data[0].scalars)
+                #self.bgs_cutout = (unredlen - unredlenpost) / unredtot
+            #else: self.bgs_cutout = 0.0
+            if phr_f:
+                unredlen = len(unred.data[0].scalars)
+                unred = self.apply_phase_reduction(unred)
+                unredlenpost = len(unred.data[0].scalars)
+                self.phr_f_cutout = (unredlen - unredlenpost) / unredtot
+            else: self.phr_f_cutout = 0.0
+            if rred_f:
+                #unredlen = len(unred.data[0].scalars)
+                unred = self.apply_replicate_reduction(unred)
+                #unredlenpost = len(unred.data[0].scalars)
+                #self.rred_f_cutout = (unredlen - unredlenpost) / unredtot
+            #else: self.rred_f_cutout = 0.0
+            if nred_f:
+                #unredlen = len(unred.data[0].scalars)
+                unred = self.apply_normalization_RFU(unred)
+                #unredlenpost = len(unred.data[0].scalars)
+                #self.nred_f_cutout = (unredlen - unredlenpost) / unredtot
+            #else: self.nred_f_cutout = 0.0
+            if domo_f:
+                #unredlen = len(unred.data[0].scalars)
+                unred = self.apply_versus_od_reduction(unred)
+                #unredlenpost = len(unred.data[0].scalars)
+                #self.domo_f_cutout = (unredlen - unredlenpost) / unredtot
+            #else: self.domo_f_cutout = 0.0
+            return unred
+
+        def apply_reductions(self):
+            unred = lfu.data_container(data = dcopy(self._all_data_))
+            unred = self.reduce_data(unred, self.timept_filtered_OD, 
+                self.timept_filtered, self.background_subtracted, 
+                self.phase_reduced, self.replicate_reduced, 
+                self.normalized_reduced, self.override_domains_with_OD)
             self.data = unred
             self.capture_targets = [x.label for x in self.data.data]
             self.output.rewidget(True)
 
 	def provide_axes_manager_input(self, 
-			lp = True, cp = False, bp = False, 
-			x_title = 'x-title', y_title = 'y-title', title = 'title'):
+                    lp = True, cp = False, bp = False, vp = False, tp = True, 
+                    x_title = 'x-title', y_title = 'y-title', title = 'title'):
 		self.use_line_plot = lp
 		self.use_color_plot = cp
 		self.use_bar_plot = bp
+		self.use_voxel_plot = vp
+                self.use_table_plot = tp
 		self.x_title = x_title
 		meas = self._measurement_
 		self.y_title = meas
@@ -326,19 +489,98 @@ class obs_data_block(data_block):
 	def set_settables(self, *args, **kwargs):
 		window = args[0]
 		self.handle_widget_inheritance(*args, **kwargs)
-		self.widg_templates.append(
+		self.widg_templates.append(                     
 			lgm.interface_template_gui(
+                                layout = 'horizontal', 
+				widgets = ['check_set', 'radio'], 
+				labels = [['Apply Phase Reduction'], 
+                                    ['Lag', 'Log', 'Stationary', 'Death']], 
+				append_instead = [False, None], 
+                                refresh = [None,[True]], 
+                                window = [None,[window]], 
+				instances = [[self], [self]], 
+                                initials = [None, [self.phase_type]], 
+				keys = [['phase_reduced'], ['phase_type']], 
+				callbacks = [
+                                    [lgb.create_reset_widgets_wrapper(
+			                window, self.apply_reductions)], 
+                                    [lgb.create_reset_widgets_wrapper(
+			                window, self.apply_reductions)]]))
+                self.widg_templates[-1] += lgm.interface_template_gui(
+                    widgets = ['text'], 
+                    read_only = [True], 
+                    box_labels = ['% Of Data Removed By Phase Reduction'], 
+                    initials = [[self.phr_f_cutout]])
+		self.widg_templates.append(                     
+			lgm.interface_template_gui(
+                                layout = 'horizontal', 
 				widgets = ['check_set'], 
-				labels = [['Apply Replicate Reduction']], 
+				labels = [['Apply Background Subtraction']], 
 				append_instead = [False], 
                                 #refresh = [[True]], 
                                 #window = [[window]], 
 				instances = [[self]], 
-				keys = [['replicate_reduced']], 
+				keys = [['background_subtracted']], 
+				callbacks = [[lgb.create_reset_widgets_wrapper(
+			            window, self.apply_reductions)]]))
+                #self.widg_templates[-1] += lgm.interface_template_gui(
+                #    widgets = ['text'], 
+                #    read_only = [True], 
+                #    box_labels = ['% Of Data Removed By Background Reduction'], 
+                #    initials = [[self.bgs_cutout]])
+                if not self.is_OD_block:
+                    self.widg_templates.append(                     
+			lgm.interface_template_gui(
+                                layout = 'horizontal', 
+				widgets = ['check_set'], 
+				labels = [['Apply OD Outlier Reduction']], 
+				append_instead = [False], 
+                                #refresh = [[True]], 
+                                #window = [[window]], 
+				instances = [[self]], 
+				keys = [['timept_filtered_OD']], 
+				callbacks = [[lgb.create_reset_widgets_wrapper(
+			            window, self.apply_reductions)]]))
+                    self.widg_templates[-1] += lgm.interface_template_gui(
+                            widgets = ['text'], 
+                            read_only = [True], 
+                            box_labels = ['% Of Data Removed By Inheriting OD Outlier Removal'], 
+                            initials = [[self.tf_od_f_cutout]])
+		    self.widg_templates.append(
+			lgm.interface_template_gui(
+                                layout = 'horizontal', 
+				widgets = ['check_set'], 
+				labels = [['Using OD As X-Domain']], 
+				append_instead = [False], 
+                                #refresh = [[True]], 
+                                #window = [[window]], 
+				instances = [[self]], 
+				keys = [['override_domains_with_OD']], 
 				callbacks = [[lgb.create_reset_widgets_wrapper(
 				    window, self.apply_reductions)]]))
+                    #self.widg_templates[-1] += lgm.interface_template_gui(
+                    #        widgets = ['text'], 
+                    #        read_only = [True], 
+                    #        initials = [[self.domo_f_cutout]])
+		    self.widg_templates.append(
+			lgm.interface_template_gui(
+                                layout = 'horizontal', 
+				widgets = ['check_set'], 
+				labels = [['Apply Normalization Reduction']], 
+				append_instead = [False], 
+                                #refresh = [[True]], 
+                                #window = [[window]], 
+				instances = [[self]], 
+				keys = [['normalized_reduced']], 
+				callbacks = [[lgb.create_reset_widgets_wrapper(
+				    window, self.apply_reductions)]]))
+                    #self.widg_templates[-1] += lgm.interface_template_gui(
+                    #        widgets = ['text'], 
+                    #        read_only = [True], 
+                    #        initials = [[self.nred_f_cutout]])
 		self.widg_templates.append(                     
 			lgm.interface_template_gui(
+                                layout = 'horizontal', 
 				widgets = ['check_set'], 
 				labels = [['Apply Outlier Reduction']], 
 				append_instead = [False], 
@@ -348,6 +590,27 @@ class obs_data_block(data_block):
 				keys = [['timept_filtered']], 
 				callbacks = [[lgb.create_reset_widgets_wrapper(
 			            window, self.apply_reductions)]]))
+                self.widg_templates[-1] += lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        box_labels = ['% Of Data Removed By Outlier Removal'], 
+                        initials = [[self.tf_f_cutout]])
+		self.widg_templates.append(
+			lgm.interface_template_gui(
+                                layout = 'horizontal', 
+				widgets = ['check_set'], 
+				labels = [['Apply Replicate Reduction']], 
+				append_instead = [False], 
+                                #refresh = [[True]], 
+                                #window = [[window]], 
+				instances = [[self]], 
+				keys = [['replicate_reduced']], 
+				callbacks = [[lgb.create_reset_widgets_wrapper(
+				    window, self.apply_reductions)]]))
+                #self.widg_templates[-1] += lgm.interface_template_gui(
+                #        widgets = ['text'], 
+                #        read_only = [True], 
+                #        initials = [[self.rred_f_cutout]])
 		lfu.modular_object_qt.set_settables(
 			self, *args, from_sub = True)
 
@@ -359,255 +622,356 @@ class cond_data(object):
             self.mean = np.mean(self.data.scalars)
             self.stdv = np.std(self.data.scalars)
 
-	def get_single_well_data(self, od_dex):
-		# THIS FUNCTION WILL JUST RETURN THE SELECTED WELLS PLOT DATA
-		#od_dex = self.get_selected_well()
-		time_ = self.data.data[0]
-		od = self.data.data[od_dex]
-		dbl = self._doubling_times_[od_dex]
-		gro = self._growth_rates_[od_dex]
-		lo, hi = self._thresholds_[od_dex]
-		#od.scalars = od.scalars
-		y_low = ldc.scalars('__skip__', [lo]*2, color = 'black')
-		#	[self.OD_threshold_low]*2, color = 'black')
-		y_high = ldc.scalars('__skip__', [hi]*2, color = 'black')
-		#	[self.OD_threshold_high]*2, color = 'black')
-		x_stack = ldc.scalars('__skip__', 
-			[time_.scalars.min(), time_.scalars.max()])
-		# CALCULATE THE DOUBLING TIME AND ADD VERTICAL LINES FOR THE POINTS USED
-		#  MAKE ALL THESE FLAT LINES DASHED OR SOMETHING
-		#pdb.set_trace()
-		data = lfu.data_container(
-			domains = [time_, x_stack, x_stack], 
-			codomains = [od, y_low, y_high], 
-			doubling = dbl, growth_rate = gro, 
-						thresholds = (lo, hi))
-		return data
+def expo(x,a,b,c):
+    exp = a * np.exp(b * x) + c
+    return exp
+
+def sigmoid(x, a, k, q, b, m, nu):
+    if not nu > 0:
+        return np.zeros(len(x))
+    sig = a + ((k - a)/(1 + q*np.exp(-b*(x - m)))**(1/nu))
+    return sig
 
 class well_data(object):
 	def __init__(self, *args, **kwargs):
-		self.well_id = args[0]
+            self.parent = kwargs['parent']
+	    self.well_id = args[0]
+            try: self.significant_figures = kwargs['significant_figures']
+            except KeyError: self.significant_figures = 4
+            self.is_OD_data = kwargs['od_data']
+            if self.is_OD_data:
+                self.lo_thresh = kwargs['lo_thresh']
+                self.mi_thresh = kwargs['mi_thresh']
+                self.hi_thresh = kwargs['hi_thresh']
 
-        def process(self):
+        def process(self, t):
             self.mean = np.mean(self.data.scalars)
             self.stdv = np.std(self.data.scalars)
+            if self.is_OD_data:
+                self.dtime, self.grate = self.doubling_time(t.scalars)
+                print 'dtimegrate', self.dtime, self.grate
 
-	def doubling(self, lo, hi, vals, t):
-		#vals = np.log(dat.scalars)
-		#lodelts = [abs(x-lo) for x in dat.scalars]
-		#pdb.set_trace()
-		lodelts = [abs(x-lo) for x in vals]
-		deldex = lodelts.index(min(lodelts))
-		t1 = t.scalars[deldex]
-		#hidelts = [abs(x-hi) for x in dat.scalars]
-		hidelts = [abs(x-hi) for x in vals]
-		deldex = hidelts.index(min(hidelts))
-		t2 = t.scalars[deldex]
-		dbling = t2 - t1
-		return dbling
+        # find the dexes in the sigmoid fit! its monotonic, smooth, 1-1
+        def find_threshold_indices(self,lo,mi,hi,vals):
+	    lodelts = [abs(x-lo) for x in vals]
+	    lodex = lodelts.index(min(lodelts))
+	    midelts = [abs(x-mi) for x in vals]
+	    midex = midelts.index(min(midelts))
+	    hidelts = [abs(x-hi) for x in vals]
+	    hidex = hidelts.index(min(hidelts))
+            return lodex,midex,hidex
 
-	def growth(self, dbl, dex):
-		try: return np.log(2.0)/dbl
-		except FloatingPointError: return None
+	def doubling_time(self, t):
+            vals = self.data.scalars
+            lo = self.lo_thresh
+            mi = self.mi_thresh
+            hi = self.hi_thresh
+            if self.parent.override_thresholds:hi = max(vals)
 
-	def get_single_well_data(self, od_dex):
-		# THIS FUNCTION WILL JUST RETURN THE SELECTED WELLS PLOT DATA
-		#od_dex = self.get_selected_well()
-		time_ = self.data.data[0]
-		od = self.data.data[od_dex]
-		dbl = self._doubling_times_[od_dex]
-		gro = self._growth_rates_[od_dex]
-		lo, hi = self._thresholds_[od_dex]
-		#od.scalars = od.scalars
-		y_low = ldc.scalars('__skip__', [lo]*2, color = 'black')
-		#	[self.OD_threshold_low]*2, color = 'black')
-		y_high = ldc.scalars('__skip__', [hi]*2, color = 'black')
-		#	[self.OD_threshold_high]*2, color = 'black')
-		x_stack = ldc.scalars('__skip__', 
-			[time_.scalars.min(), time_.scalars.max()])
-		# CALCULATE THE DOUBLING TIME AND ADD VERTICAL LINES FOR THE POINTS USED
-		#  MAKE ALL THESE FLAT LINES DASHED OR SOMETHING
-		#pdb.set_trace()
-		data = lfu.data_container(
-			domains = [time_, x_stack, x_stack], 
-			codomains = [od, y_low, y_high], 
-			doubling = dbl, growth_rate = gro, 
-						thresholds = (lo, hi))
-		return data
+	    siglodelts = [abs(x-lo) for x in vals]
+	    siglodex = siglodelts.index(min(siglodelts))
+            sigdelts = [abs(x-hi) for x in vals]
+            sighidex = sigdelts.index(min(sigdelts))
+            sigxrelev = t[siglodex:sighidex]/60.0
+            sigyrelev = vals[siglodex:sighidex]
+            try:
+                poptsi, pcovsi = cufit(sigmoid, sigxrelev, sigyrelev)
+                self.cufit_data_sig = ldc.scalars(label = 'sigmoid-fit', 
+                    scalars = sigmoid(sigxrelev, *poptsi), 
+                    domain = 60.0*sigxrelev, color = 'r',  
+                    override_domain = True)
+                if self.parent.override_thresholds:
+                    inflect = poptsi[4]*60.0
+                    print 'inflection!', inflect, self.well_id
+                    inflectdelts = [abs(t_ - inflect) for t_ in t]
+                    inflectdex = inflectdelts.index(min(inflectdelts))
+                    try: mi = vals[inflectdex]
+                    except IndexError:
+                        print 'could not find OD threshold from sigmoidal-fit!',self.well_id
+                        mi = self.mi_thresh
+                lodex,midex,hidex = self.find_threshold_indices(
+                    lo,mi,hi,self.cufit_data_sig.scalars)
+                lodex += siglodex
+                midex += siglodex
+                hidex += siglodex
+            except RuntimeError:
+                print 'runtimeerror: scipy could not fit a curve for well',self.well_id
+                self.cufit_data_sig = ldc.scalars(label = 'sigmoid-fit', 
+                    scalars = [], domain = [], override_domain = True)
+                lodex,midex,hidex = self.find_threshold_indices(lo,mi,hi,vals)
+            except TypeError:
+                print 'typeerror: scipy could not fit a curve for well', self.well_id
+                self.cufit_data_sig = ldc.scalars(label = 'sigmoid-fit', 
+                    scalars = [], domain = [], override_domain = True)
+                lodex,midex,hidex = self.find_threshold_indices(lo,mi,hi,vals)
+
+            self.threshlines = []
+            self.threshlines.append(ldc.scalars(label = '__skip__lo', 
+                scalars = [lo,lo], override_domain = True, color = 'black',  
+                linestyle = '--',linewidth = 2.0,
+                domain = [t[0],t[len(vals) - 1]]))
+            self.threshlines.append(ldc.scalars(label = '__skip__mi', 
+                scalars = [mi,mi], override_domain = True, color = 'black',  
+                linestyle = '--',linewidth = 2.0,
+                domain = [t[0],t[len(vals) - 1]]))
+            self.threshlines.append(ldc.scalars(label = '__skip__hi', 
+                scalars = [hi,hi], override_domain = True, color = 'black', 
+                linestyle = '--',linewidth = 2.0,
+                domain = [t[0],t[len(vals) - 1]]))
+
+            expxrelev = t[lodex:midex]/60.0
+            expyrelev = vals[lodex:midex]
+            if len(expyrelev) == 0:
+                print 'empty data set for well', self.well_id
+                return 0.0, 0.0
+            try:
+                poptex, pcovex = cufit(expo, expxrelev, expyrelev)
+                self.cufit_data_exp = ldc.scalars(label = 'expo-fit', 
+                    scalars = expo(expxrelev, *poptex), domain = 60.0*expxrelev, 
+                    override_domain = True, color = 'g', linewidth = 1.5)
+            except RuntimeError:
+                print 'runtimeerror: scipy could not fit a curve for well', self.well_id
+                return 0.0, 0.0
+            except TypeError:
+                print 'runtimeerror: scipy could not fit a curve for well', self.well_id
+                return 0.0, 0.0
+
+            self.lo_thresh = lo
+            self.mi_thresh = mi
+            self.hi_thresh = hi
+            sigfigs = self.significant_figures
+            grate = round(poptex[1]/60.0,sigfigs)
+            if grate == 0.0:
+                print 'growth rate rounded to 0.0!', self.well_id
+                return 0.0,0.0
+            dbling = round(np.log(2)/grate,sigfigs)
+	    return dbling, grate
 
 class optical_density_block(obs_data_block):
-	def __init__(self, *args, **kwargs):
-		self.impose_default('OD_threshold_low', 0.05)
-		self.impose_default('OD_threshold_high', 0.7)
+	def __init__(self, *args, **kwargs):                      
+		self.impose_default('OD_threshold_low', 0.1)
+		self.impose_default('OD_threshold_middle', 0.6)
+		self.impose_default('OD_threshold_high', 1.0)
+                self.impose_default('selected_row',None)
 		#lo = 0.05
 		#hi = 0.7
 		self.impose_default('_well_select_', None)
+                kwargs['is_OD_block'] = True             
 		obs_data_block.__init__(self, *args, **kwargs)
 
-	def doubling(self, lo, hi, vals, t):
-		#vals = np.log(dat.scalars)
-		#lodelts = [abs(x-lo) for x in dat.scalars]
-		#pdb.set_trace()
-		lodelts = [abs(x-lo) for x in vals]
-		deldex = lodelts.index(min(lodelts))
-		t1 = t.scalars[deldex]
-		#hidelts = [abs(x-hi) for x in dat.scalars]
-		hidelts = [abs(x-hi) for x in vals]
-		deldex = hidelts.index(min(hidelts))
-		t2 = t.scalars[deldex]
-		dbling = t2 - t1
-		return dbling
+        def get_threshold_index(self, vals, th):
+	    lodelts = [abs(x-th) for x in vals]
+            deldex = lodelts.index(min(lodelts))
+            return deldex
 
-	def growth(self, dbl, dex):
-		try: return np.log(2.0)/dbl
-		except FloatingPointError: return None
+        def get_lo_hi_threshold_indexes(self, lo, mi, hi, vals = None):
+            indices = []
+            #for da in self.data.data:
+            #    vals = da.scalars
+            if vals is None:
+                daters = [d.data for d in self.well_mobjs.values()]
+                vcnt = len(daters[0].scalars)
+                vals = []
+                for tdx in xrange(vcnt):
+                    coll = [d.scalars[tdx] for d in daters]
+                    me = np.mean(coll)
+                    vals.append(me)
+            lodex = self.get_threshold_index(vals, lo)
+            midex = self.get_threshold_index(vals, mi)
+            hidex = self.get_threshold_index(vals, hi)
+            #cond_cnt = len(self._cond_key_)
+            #indices = indices[cond_cnt:]
+            return lodex, midex, hidex
 
-	def deep_parse(self, pra):
-		obs_data_block.deep_parse(self, pra)
-		_unred_ = self._unreduced_.data
-		ti = _unred_[0]
-		low = self.OD_threshold_low
-		high = self.OD_threshold_high
-		cond_cnt = len(self._cond_key_)
-		nones = [None]*cond_cnt
-		self._thresholds_ = nones +\
-			[(low,high)]*len(_unred_[cond_cnt:])
-		self._doubling_times_ = nones +\
-			[self.doubling(low,high,np.log(unred.scalars),ti) for 
-				unred in _unred_[cond_cnt:]]
-		self._growth_rates_ = nones +\
-			[self.growth(dbl, dex) for dex, dbl in 
-				enumerate(self._doubling_times_[cond_cnt:])]
-
-	def get_selected_well(self):
-		try: od_dex = self._well_key_.index(self._well_select_)
-		except ValueError:
-			od_dex = 0
-			self._well_select_ = self._well_key_[od_dex]
-		cond_cnt = len(self._cond_key_)
-		return od_dex + cond_cnt
-
-	def get_single_well_data(self, od_dex):
-		# THIS FUNCTION WILL JUST RETURN THE SELECTED WELLS PLOT DATA
-		#od_dex = self.get_selected_well()
-		time_ = self.data.data[0]
-		od = self.data.data[od_dex]
-		dbl = self._doubling_times_[od_dex]
-		gro = self._growth_rates_[od_dex]
-		lo, hi = self._thresholds_[od_dex]
-		#od.scalars = od.scalars
-		y_low = ldc.scalars('__skip__', [lo]*2, color = 'black')
-		#	[self.OD_threshold_low]*2, color = 'black')
-		y_high = ldc.scalars('__skip__', [hi]*2, color = 'black')
-		#	[self.OD_threshold_high]*2, color = 'black')
-		x_stack = ldc.scalars('__skip__', 
-			[time_.scalars.min(), time_.scalars.max()])
-		# CALCULATE THE DOUBLING TIME AND ADD VERTICAL LINES FOR THE POINTS USED
-		#  MAKE ALL THESE FLAT LINES DASHED OR SOMETHING
-		#pdb.set_trace()
-		data = lfu.data_container(
-			domains = [time_, x_stack, x_stack], 
-			codomains = [od, y_low, y_high], 
-			doubling = dbl, growth_rate = gro, 
-						thresholds = (lo, hi))
-		return data
+        def impose_global_thresholds(self):
+            wobjs = self.well_mobjs
+            glow = self.OD_threshold_low
+            gmid = self.OD_threshold_middle
+            ghigh = self.OD_threshold_high
+            for ke in wobjs.keys():
+                wobj = wobjs[ke]
+                wobj.lo_thresh = glow
+                wobj.mi_thresh = gmid
+                wobj.hi_thresh = ghigh
+            self.recalculate_doubling()
 
 	def recalculate_doubling(self):
-		od_dex = self.get_selected_well()
-		lo, hi = self._thresholds_[od_dex]
-		dat = self.data.data[od_dex]
-		t = self.data.data[0]
-		self._doubling_times_[od_dex] = self.doubling(lo, hi, dat, t)
-		self._growth_rates_[od_dex] =\
-			self.growth(self._doubling_times_[od_dex])
-		self.rewidget(True)
+            for ke in self.well_mobjs.keys():
+                self.recalculate_individual_doubling(ke)
 
-	def thresh_spin_callback(self, typ):
-		def thresh_spin_callback_lo(val, inst, key):
-			old = thresh[key][1]
-			altered = (val, old)
-			return altered
-		def thresh_spin_callback_hi(val, inst, key):
-			old = thresh[key][0]
-			altered = (old, val)
-			return altered
-		thresh = self._thresholds_
-		if typ == 'lo': return thresh_spin_callback_lo
-		elif typ == 'hi': return thresh_spin_callback_hi
+        def recalculate_individual_doubling(self, well):
+            wobj = self.well_mobjs[well]
+            tdata = self.cond_mobjs['Time'].data
+            wobj.process(tdata)
+	    self.rewidget(True)
+
+        def change_thresh_callback(self, spinwidg):
+            if hasattr(spinwidg._modu_inst_, 'well_id'):
+                well = spinwidg._modu_inst_.well_id
+            else: return
+            self.recalculate_individual_doubling(well)
+            dtime_txtbox = self.__dict__['_modu_dtime_txtbox_'+well][0]
+            grate_txtbox = self.__dict__['_modu_grate_txtbox_'+well][0]
+            newdtime = self.well_mobjs[well].dtime
+            newgrate = self.well_mobjs[well].grate
+            dtime_txtbox.setText(str(newdtime))
+            grate_txtbox.setText(str(newgrate))
+            if well == self.selected_row: self.redraw_plot()
+
+        def change_table_selection(self, table, rowlabel):
+            self.selected_row = rowlabel
+            self.redraw_plot(rowlabel)
+
+        def redraw_plot(self, well = None):
+            if not well in self._well_key_:
+                if self.selected_row is None: return
+                else: well = self.selected_row
+            qplot = self.qplot[0]
+            data = self.get_well_data(well)
+            ptype = 'lines'
+            qplot.plot(data,'time','OD',
+                'OD of ' + well, ptype = ptype)
+            print 'want to show plot for well', well
+            
+        def get_well_data(self, well):
+            datacont = lfu.data_container()
+            xrelev = self.cond_mobjs['Time'].data
+            yrelev = self.well_mobjs[well].data
+            cudataexp = self.well_mobjs[well].cufit_data_exp
+            cudatasig = self.well_mobjs[well].cufit_data_sig
+            threshlines = self.well_mobjs[well].threshlines
+            datacont.data = [xrelev,yrelev,cudataexp,cudatasig]+threshlines
+            datacont.x_log = False
+            datacont.y_log = False
+            datacont.active_targs = [well,
+                'expo-fit','sigmoid-fit',
+                '__skip__lo','__skip__mi','__skip__hi']
+            datacont.xdomain = 'Time'
+            return datacont
 
 	def set_settables(self, *args, **kwargs):
 		window = args[0]
 		self.handle_widget_inheritance(*args, **kwargs)
-		# WE NEED A PANEL FOR THE SELECTED WELLS DATA - PLOT, THRESHOLD VALUES, CALCULATED DOUBLING TIME
-		# RESELECTING THE WELL REFRESHES THE PAGE
-		# NEED A BUTTON TO RECALCULATE THAT WELLS DOUBLING TIME USING THAT WELLS THRESHOLDS
-		# BUT THE INITIAL DOUBLING TIMES AND THRESHOLDS MUST BE SET AT DEEP_PARSE TIME
-		
-		od_dex = self.get_selected_well()
-		data = self.get_single_well_data(od_dex)
-		lo, hi = self._thresholds_[od_dex]
-
-		od_thresh = lgm.interface_template_gui(
-				widgets = ['spin'], 
-				layout = 'horizontal', 
-				doubles = [[True]], 
-				initials = [[lo]], 
-				minimum_values = [[0.0]],
-				maximum_values = [[10.0]],
-				single_steps = [[0.01]], 
-				callbacks = [[self.thresh_spin_callback('lo')]], 
-				instances = [[self._thresholds_]], 
-				keys = [[od_dex]], 
-				parents = [[self]], 
-				box_labels = ['Low Threshold'])
-		od_thresh += lgm.interface_template_gui(
-				widgets = ['spin'], 
-				doubles = [[True]], 
-				initials = [[hi]], 
-				minimum_values = [[0.0]],
-				maximum_values = [[10.0]],
-				single_steps = [[0.01]], 
-				callbacks = [[self.thresh_spin_callback('hi')]], 
-				instances = [[self._thresholds_]], 
-				keys = [[od_dex]], 
-				parents = [[self]], 
-				box_labels = ['High Threshold'])
-
-		dbl = data.doubling
-		gro = data.growth_rate
-		dbl_time = lgm.interface_template_gui(
-				widgets = ['text', 'text'], 
-				layout = 'vertical', 
-				read_only = [True, True], 
-				initials = [[dbl], [gro]], 
-				alignments = [['center'], ['center']], 
-				box_labels = ['Doubling Time', 'Growth Rate'])
-		dbl_time += lgm.interface_template_gui(
-				widgets = ['button_set'], 
-				bindings = [[lgb.create_reset_widgets_wrapper(
-						window, self.recalculate_doubling)]], 
-				labels = [['Recalculate This\nDoubling Time']])
-
-		dbl_meas_template = lgm.interface_template_gui(
-				widgets = ['panel'], 
-				layout = 'horizontal', 
-				templates = [[dbl_time, od_thresh]], 
-				box_labels = ['Doubling Time Measurement'])
-		#dbl_meas_template += lgm.interface_template_gui(
-		#		widgets = ['plot'], 
-		#		datas = [data])
-		self.widg_templates.append(dbl_meas_template)
-
 		self.widg_templates.append(
-			lgm.interface_template_gui(
-				widgets = ['selector'], 
-				instances = [[self]],
-				keys = [['_well_select_']], 
-				initials = [[self._well_select_]], 
-				refresh = [[True]], 
-				window = [[window]], 
-				labels = [self._well_key_], 
-				box_labels = ['Relevant Well']))
+                    lgm.interface_template_gui(
+		        widgets = ['button_set'], 
+			bindings = [[
+                            [lgb.create_reset_widgets_wrapper(
+                                window, self.recalculate_doubling),
+                                    self.redraw_plot], 
+                            [lgb.create_reset_widgets_wrapper(
+                                window, self.impose_global_thresholds), 
+                                    self.redraw_plot]]], 
+			labels = [['Recalculate Doubling Times', 
+                            'Impose Global Thresholds']]))
+                wobjs = self.well_mobjs
+                heads = ['Low OD Cutoff', 'Middle OD Cutoff', 
+                    'High OD Cutoff', 'Doubling Time', 'Growth Rate']
+                rows = ['Global'] + [we for we in self._well_key_]
+                temps = []
+                for row in rows:
+                    rowtemps = []
+                    for head in heads:
+                        if head == 'Low OD Cutoff':
+                            if row == 'Global':
+                                inst = self
+                                key = 'OD_threshold_low'
+                            else:
+                                inst = wobjs[row]
+                                key = 'lo_thresh'
+                            rowtemps.append(
+                                lgm.interface_template_gui(
+                                    doubles = [[True]], 
+                                    widgets = ['spin'], 
+                                    single_steps = [[0.01]], 
+                                    callbacks = [[self.change_thresh_callback]], 
+                                    instances = [[inst]], 
+                                    keys = [[key]], 
+                                    initials = [[inst.__dict__[key]]], 
+                                    ))
+                        elif head == 'Middle OD Cutoff':
+                            if row == 'Global':
+                                inst = self
+                                key = 'OD_threshold_middle'
+                            else:
+                                inst = wobjs[row]
+                                key = 'mi_thresh'
+                            rowtemps.append(
+                                lgm.interface_template_gui(
+                                    doubles = [[True]], 
+                                    widgets = ['spin'], 
+                                    single_steps = [[0.01]], 
+                                    callbacks = [[self.change_thresh_callback]], 
+                                    instances = [[inst]], 
+                                    keys = [[key]], 
+                                    initials = [[inst.__dict__[key]]], 
+                                    ))
+                        elif head == 'High OD Cutoff':
+                            if row == 'Global':
+                                inst = self
+                                key = 'OD_threshold_high'
+                            else:
+                                inst = wobjs[row]
+                                key = 'hi_thresh'
+                            rowtemps.append(
+                                lgm.interface_template_gui(
+                                    doubles = [[True]], 
+                                    widgets = ['spin'], 
+                                    single_steps = [[0.01]], 
+                                    instances = [[inst]], 
+                                    keys = [[key]], 
+                                    callbacks = [[self.change_thresh_callback]], 
+                                    initials = [[inst.__dict__[key]]], 
+                                    ))
+                        elif head == 'Doubling Time':
+                            if not row == 'Global':
+                                wobj = wobjs[row]
+                                dtime = str(wobj.dtime)
+                                rowtemps.append(
+                                    lgm.interface_template_gui(
+                                        widgets = ['text'], 
+                                        read_only = [True], 
+                                        initials = [[dtime]], 
+                                        handles = [(self, 
+                                            '_modu_dtime_txtbox_' + row)], 
+                                        ))
+                            else: rowtemps.append(None)
+                        elif head == 'Growth Rate':
+                            if not row == 'Global':
+                                wobj = wobjs[row]
+                                grate = str(wobj.grate)
+                                rowtemps.append(
+                                    lgm.interface_template_gui(
+                                        widgets = ['text'], 
+                                        read_only = [True], 
+                                        initials = [[grate]], 
+                                        handles = [(self, 
+                                            '_modu_grate_txtbox_' + row)], 
+                                        ))
+                            else: rowtemps.append(None)
+                    temps.append(rowtemps)
+                self.widg_templates.append(
+                        lgm.interface_template_gui(
+                            widgets = ['check_set'], 
+                            append_instead = [False], 
+                            labels = [['Autofind Thresholds Using Sigmoid-Fit']], 
+                            instances = [[self]], 
+			    #callbacks = [[lgb.create_reset_widgets_wrapper(
+			    #    window, self.recalculate_doubling)]], 
+                            keys = [['override_thresholds']]))
+                self.widg_templates.append(
+                        lgm.interface_template_gui(
+                                layout = 'horizontal', 
+                                widgets = ['table'], 
+                                labels = [[heads, rows]],  
+                                callbacks = [[self.change_table_selection]], 
+                                templates = [temps]))
+                data = self.get_well_data('A1')
+                self.widg_templates[-1] +=\
+                    lgm.interface_template_gui(
+                        widgets = ['plot'], 
+                        handles = [(self, 'qplot')], 
+                        datas = [data])
 		obs_data_block.set_settables(self, *args, from_sub = True)
 
 class data_pool(data_block):
@@ -617,6 +981,7 @@ class data_pool(data_block):
 	def append(self, value):
 		value.parent = self
 		self.data.append(value)
+                if value.is_OD_block: self.OD_block_index = len(self.data) - 1
 		self._children_ = self.data
 	def _read_(self, *args, **kwargs):
 		for bl in self.data: bl._read_(*args, **kwargs)
@@ -624,6 +989,8 @@ class data_pool(data_block):
 		for bl in self.data: bl.deep_parse(*args, **kwargs)
 	def get_targets(self):
 		return [bl.label for bl in self.data]
+        def get_OD_block(self):
+                return self.data[self.OD_block_index]
 
 class plate_reader_analyzer(lfu.modular_object_qt):
 
@@ -636,6 +1003,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		in_tmp = lset.get_setting('default_input_template')
 		self.impose_default('input_data_file',in_dat,**kwargs)
 		self.impose_default('input_tmpl_file',in_tmp,**kwargs)
+                self.impose_default('significant_figures',3,**kwargs)
 		self.current_tab_index = 0
 		self.current_tab_index_outputs = 0
 		self.postprocess_plan = lpp.post_process_plan(
