@@ -252,20 +252,27 @@ class obs_data_block(data_block):
                 if not len(blanks) == 1:
                     print 'blank wells should not change identity!!'
                     pdb.set_trace()
+                spl = blanks[0].split(' ')
+                rng = lm.make_range(spl[1])[0].split(',')
+                blanks = [''.join([spl[0], str(int(float(r)))]) for r in rng]
                 self.blank_well_filter(pra, blanks)
 
         def blank_well_filter(self, pra, blanks):
+            # determine if every blank well data point is an outlier
+            # if at a given timepoint, one of 3 blank wells is an outlier
+            #  do not use this value to calculate background noise
+            # if at a given timepoint, two or more of 3 blank wells are outliers
+            #  throw out all data associated with that time point
+            # also identify what fraction of each blank well is an outlier and
+            #  report
 
             def outlier(val,mean,std):
                 stdthresh = self.blank_well_filter_std_factor*std
                 out = abs(val - mean) > stdthresh
                 return out
 
-            spl = blanks[0].split(' ')
-            rng = lm.make_range(spl[1])[0].split(',')
-            #_unred_ = self._unreduced_.data
-            blanks = [''.join([spl[0], str(int(float(r)))]) for r in rng]
             blank_wells = [self.well_mobjs[ke] for ke in blanks]
+            self.blank_well_mobjs = blank_wells
             if not blank_wells:
                 print 'NO BLANK WELL DATA IDENTIFIED!!'
                 pdb.set_trace()
@@ -289,7 +296,15 @@ class obs_data_block(data_block):
             if not bground_values:
                 print 'NO BLANK WELLS FOUND ACCEPTABLE!!'
                 pdb.set_trace()
-            self.bground_noise = np.mean(bground_values)
+
+            self.blankwell_outliers = {'total':float(len(flags))}
+            tot = self.blankwell_outliers['total']
+            for blnk,blankwell in zip(blanks, zip(*flags)):
+                badfrac = (blankwell.count(True)/tot)*100.0
+                self.blankwell_outliers[blnk] = badfrac
+
+            self.bground_noise_mean = np.mean(bground_values)
+            self.bground_noise_stddev = np.std(bground_values)
             self.flagged_timepts = timept_flags
 
         def apply_normalization_RFU(self, unred):
@@ -321,29 +336,27 @@ class obs_data_block(data_block):
             return unred
 
         def apply_timept_flags_OD(self, unred):
+            pra = self.parent.parent
+            blanks = [mobj.well_id for mobj in self.blank_well_mobjs]
+            self.blank_well_filter(pra, blanks)
             if self.is_OD_block: return unred
             OD_block = self.parent.get_OD_block()
             flagged_timepts = OD_block.flagged_timepts
-            #_filtered_ = []      
             for d in unred.data:
                 subd = [d.scalars[vdx] for vdx in xrange(len(d.scalars)) 
                         if not vdx in flagged_timepts]
                 d.scalars = subd
-                #filt = ldc.scalars(label = d.label, scalars = subd)
-                #_filtered_.append(filt)
-            #return lfu.data_container(data = _filtered_)
             return unred
 
         def apply_timept_flags(self, unred):
-            #_filtered_ = []
+            pra = self.parent.parent
+            blanks = [mobj.well_id for mobj in self.blank_well_mobjs]
+            self.blank_well_filter(pra, blanks)
             for d in unred.data:
                 subd = [d.scalars[vdx] for vdx in xrange(len(d.scalars)) 
                         if not vdx in self.flagged_timepts]
                 d.scalars = subd
-                #filt = ldc.scalars(label = d.label, scalars = subd)
-                #_filtered_.append(filt)
             return unred
-            #return lfu.data_container(data = _filtered_)
 
         #consider broken!
 	def apply_replicate_reduction(self, unred):
@@ -372,16 +385,11 @@ class obs_data_block(data_block):
             def smart_subtract(val):
                 if val < 0.0: return self.fake_zero_value
                 return val
-            #_filtered_ = []
-            bg = self.bground_noise
-            print 'background', bg
+            bg = self.bground_noise_mean
             for d in unred.data:
                 if d.label in self._well_key_:
                     subd = np.array([smart_subtract(v - bg) for v in d.scalars])
                     d.scalars = subd
-                #filt = ldc.scalars(label = d.label, scalars = subd)
-                #_filtered_.append(filt)
-            #return lfu.data_container(data = _filtered_)
             return unred
 
         def apply_phase_reduction(self, unred):
@@ -523,11 +531,16 @@ class obs_data_block(data_block):
 				keys = [['background_subtracted']], 
 				callbacks = [[lgb.create_reset_widgets_wrapper(
 			            window, self.apply_reductions)]]))
-                #self.widg_templates[-1] += lgm.interface_template_gui(
-                #    widgets = ['text'], 
-                #    read_only = [True], 
-                #    box_labels = ['% Of Data Removed By Background Reduction'], 
-                #    initials = [[self.bgs_cutout]])
+                self.widg_templates[-1] += lgm.interface_template_gui(
+                    widgets = ['text'], 
+                    read_only = [True], 
+                    box_labels = ['Mean Background Noise'], 
+                    initials = [[self.bground_noise_mean]])
+                self.widg_templates[-1] += lgm.interface_template_gui(
+                    widgets = ['text'], 
+                    read_only = [True], 
+                    box_labels = ['Stddev Background Noise'], 
+                    initials = [[self.bground_noise_stddev]])
                 if not self.is_OD_block:
                     self.widg_templates.append(                     
 			lgm.interface_template_gui(
@@ -591,10 +604,25 @@ class obs_data_block(data_block):
 				callbacks = [[lgb.create_reset_widgets_wrapper(
 			            window, self.apply_reductions)]]))
                 self.widg_templates[-1] += lgm.interface_template_gui(
-                        widgets = ['text'], 
-                        read_only = [True], 
-                        box_labels = ['% Of Data Removed By Outlier Removal'], 
-                        initials = [[self.tf_f_cutout]])
+                        widgets = ['spin'], 
+                        keys = [['blank_well_filter_std_factor']], 
+                        instances = [[self]], 
+                        box_labels = ['Sigma Threshold For Outlier Removal'], 
+                        doubles = [[True]], 
+                        single_steps = [[1.0]], 
+                        initials = [[self.blank_well_filter_std_factor]])
+                blnk_well_ids = [we.well_id for we in self.blank_well_mobjs]
+                badfraclabels = [
+                        '% Of Data Identified As Outliers In Well ' + well 
+                        for well in blnk_well_ids]
+                badfracvalues = [[self.blankwell_outliers[ke]] 
+                                    for ke in blnk_well_ids]
+                self.widg_templates[-1] += lgm.interface_template_gui(
+                        widgets = ['text','text','text','text'], 
+                        read_only = [True, True, True, True], 
+                        box_labels = ['% Of Data Removed By Outlier Removal'] +\
+                                        badfraclabels, 
+                        initials = [[self.tf_f_cutout]]+[b for b in badfracvalues])
 		self.widg_templates.append(
 			lgm.interface_template_gui(
                                 layout = 'horizontal', 
@@ -666,7 +694,11 @@ class well_data(object):
             lo = self.lo_thresh
             mi = self.mi_thresh
             hi = self.hi_thresh
-            if self.parent.override_thresholds:hi = max(vals)
+            if self.parent.override_thresholds:
+                bg = self.parent.bground_noise_mean +\
+                    self.parent.bground_noise_stddev
+                lo = bg
+                hi = max(vals)
 
 	    siglodelts = [abs(x-lo) for x in vals]
 	    siglodex = siglodelts.index(min(siglodelts))
@@ -676,12 +708,19 @@ class well_data(object):
             sigyrelev = vals[siglodex:sighidex]
             try:
                 poptsi, pcovsi = cufit(sigmoid, sigxrelev, sigyrelev)
+                sigdat = sigmoid(sigxrelev, *poptsi)
+                sigdatdom = 60.0*sigxrelev
                 self.cufit_data_sig = ldc.scalars(label = 'sigmoid-fit', 
-                    scalars = sigmoid(sigxrelev, *poptsi), 
-                    domain = 60.0*sigxrelev, color = 'r',  
+                    scalars = sigdat, domain = sigdatdom, color = 'r',  
                     override_domain = True)
                 if self.parent.override_thresholds:
-                    inflect = poptsi[4]*60.0
+                    sigmoid_2nd_deriv = [
+                        abs(lm.calc_2nd_deriv(sigdatdom, sigdat, k)) 
+                            for k in range(1,len(sigdatdom)-1)]
+                    infl_deriv = min(sigmoid_2nd_deriv)
+                    infl_dex = sigmoid_2nd_deriv.index(infl_deriv)
+                    inflect = sigdatdom[infl_dex]
+                    #inflect = poptsi[4]*60.0
                     print 'inflection!', inflect, self.well_id
                     inflectdelts = [abs(t_ - inflect) for t_ in t]
                     inflectdex = inflectdelts.index(min(inflectdelts))
