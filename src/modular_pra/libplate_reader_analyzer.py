@@ -12,7 +12,7 @@ import numpy as np
 from scipy.optimize import curve_fit as cufit
 
 from copy import deepcopy as dcopy
-import os, sys, time, traceback
+import os, sys, time, traceback, re
 import pdb
 
 
@@ -136,6 +136,16 @@ class obs_data_block(data_block):
 		self._children_ = [self.output]
 		self.output.output_plt = False
 
+        def determine_replicates(self, pra, wells):
+            repcnt = int(pra.reps_per_rep)
+            grouped = [wells[k::repcnt] for k in range(repcnt)]
+            grouped = zip(*grouped)
+            repkey = []
+            for gr in grouped:
+                #nums = [re.search('\d+', g) for g in gr]
+                repkey.append(';'.join(gr))
+            return repkey
+
 	def _read_(self, pra):
 		meas = self.swap_check(self.raw[0])
 		self._measurement_ = meas
@@ -144,6 +154,10 @@ class obs_data_block(data_block):
                 except:pdb.set_trace()
 		well_count = len(wells)
 		self._well_key_ = wells
+                pra._well_key_ = wells
+                repkey = self.determine_replicates(pra, wells)
+                self._replicate_key_ = repkey
+                pra._replicate_key_ = repkey
 		conds = layout[0].split(',')
 		cond_count = len(conds)
 		self._cond_key_ = conds
@@ -151,6 +165,7 @@ class obs_data_block(data_block):
 		meas_count = len(data_lines)
 		_cond_data_ = np.ndarray((meas_count,cond_count),dtype=object)
 		_well_data_ = np.ndarray((meas_count,well_count),dtype=object)
+                self.replicate_mobjs = {}
                 self.well_mobjs = {}
                 self.cond_mobjs = {}
 		for re_dex, re in enumerate(data_lines):
@@ -169,6 +184,14 @@ class obs_data_block(data_block):
                             well_data(well, od_data = self.is_OD_block, 
                                 lo_thresh = lo, mi_thresh = mi, hi_thresh = hi, 
                                 parent = self)
+                for repdex, rep in enumerate(self._replicate_key_):
+                    repwells = []
+                    for wekey in self._well_key_:
+                        if rep.count(wekey) > 0:
+                            repwells.append(self.well_mobjs[wekey])
+                    self.replicate_mobjs[rep] = replicate_data(
+                        rep, od_data = self.is_OD_block, 
+                        parent = self, wells = repwells)
 		self._cond_data_ = _cond_data_
 		self._well_data_ = _well_data_
 		read = OrderedDict()
@@ -242,6 +265,9 @@ class obs_data_block(data_block):
                         self.well_mobjs[key].process(timedata)
                         all_data.append(new)
 			#wel_data[dex].scalars = filter_(key, weldat[:,dex])
+                repkey = self._replicate_key_
+                for dex, key in enumerate(repkey):
+                    self.replicate_mobjs[key].process()
                 self._unreduced_ = lfu.data_container(data = all_data[:])
                 self._all_data_ = all_data
                 #self.data = self._unreduced_
@@ -660,7 +686,31 @@ def sigmoid(x, a, k, q, b, m, nu):
     sig = a + ((k - a)/(1 + q*np.exp(-b*(x - m)))**(1/nu))
     return sig
 
+class replicate_data(object):
+
+    def __init__(self, *args, **kwargs):
+        self.replicate_id = args[0]
+        self.parent = kwargs['parent']
+        self.wells = kwargs['wells']
+        try: self.significant_figures = kwargs['significant_figures']
+        except KeyError: self.significant_figures = 4
+        self.is_OD_data = kwargs['od_data']
+
+    def process(self):
+        sfigs = self.significant_figures
+        if self.is_OD_data:
+            dtimevals = []
+            gratevals = []
+            for we in self.wells:
+                dtimevals.append(we.dtime)
+                gratevals.append(we.grate)
+            self.mean_doubling_time = np.round(np.mean(dtimevals), sfigs)
+            self.mean_growth_rate = np.round(np.mean(gratevals), sfigs)
+            self.stddev_doubling_time = np.round(np.std(dtimevals), sfigs)
+            self.stddev_growth_rate = np.round(np.std(gratevals), sfigs)
+
 class well_data(object):
+
 	def __init__(self, *args, **kwargs):
             self.parent = kwargs['parent']
 	    self.well_id = args[0]
@@ -792,6 +842,7 @@ class optical_density_block(obs_data_block):
 		self.impose_default('OD_threshold_middle', 0.6)
 		self.impose_default('OD_threshold_high', 1.0)
                 self.impose_default('selected_row',None)
+		self.current_tab_index_tablebook = 0
 		#lo = 0.05
 		#hi = 0.7
 		self.impose_default('_well_select_', None)
@@ -837,12 +888,20 @@ class optical_density_block(obs_data_block):
 	def recalculate_doubling(self):
             for ke in self.well_mobjs.keys():
                 self.recalculate_individual_doubling(ke)
+            self.recalculate_replicate_doubling()
 
         def recalculate_individual_doubling(self, well):
             wobj = self.well_mobjs[well]
             tdata = self.cond_mobjs['Time'].data
             wobj.process(tdata)
 	    self.rewidget(True)
+
+        def recalculate_replicate_doubling(self):
+            for ke in self.replicate_mobjs.keys():
+                robj = self.replicate_mobjs[ke]
+                robj.process()
+                #wobjs = robj.wells
+            self.rewidget(True)
 
         def change_thresh_callback(self, spinwidg):
             if hasattr(spinwidg._modu_inst_, 'well_id'):
@@ -887,6 +946,42 @@ class optical_density_block(obs_data_block):
                 '__skip__lo','__skip__mi','__skip__hi']
             datacont.xdomain = 'Time'
             return datacont
+
+        def calculate_rep_table(self):
+            repheads = [
+                'Mean Doubling Time', 
+                'Mean Growth Rate', 
+                'Stddev Of Doubling Time', 
+                'Stddev Of Growth Rate']
+            reptemps = []
+            reprows = self._replicate_key_[:]
+            for rdx,ro in enumerate(reprows):
+                replic = self.replicate_mobjs[ro]
+                #reptemps.append([])
+                mdtime = str(replic.mean_doubling_time)
+                mgrate = str(replic.mean_growth_rate)
+                stddtime = str(replic.stddev_doubling_time)
+                stdgrate = str(replic.stddev_growth_rate)
+                rotemps = [
+                    lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        initials = [[mdtime]]), 
+                    lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        initials = [[mgrate]]), 
+                    lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        initials = [[stddtime]]), 
+                    lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        initials = [[stdgrate]]), 
+                    ]
+                reptemps.append(rotemps)
+            return repheads, reprows, reptemps
 
 	def set_settables(self, *args, **kwargs):
 		window = args[0]
@@ -989,6 +1084,59 @@ class optical_density_block(obs_data_block):
                                         ))
                             else: rowtemps.append(None)
                     temps.append(rowtemps)
+                table_for_all_wells_template = \
+                        lgm.interface_template_gui(
+                            layout = 'vertical', 
+                            widgets = ['check_set'], 
+                            append_instead = [False], 
+                            labels = [['Autofind Thresholds Using Sigmoid-Fit']], 
+                            instances = [[self]], 
+			    #callbacks = [[lgb.create_reset_widgets_wrapper(
+			    #    window, self.recalculate_doubling)]], 
+                            keys = [['override_thresholds']])
+                table_plot_template =\
+                        lgm.interface_template_gui(
+                                layout = 'horizontal', 
+                                widgets = ['table'], 
+                                labels = [[heads, rows]],  
+                                callbacks = [[self.change_table_selection]], 
+                                templates = [temps])
+                data = self.get_well_data('A1')
+                table_plot_template +=\
+                    lgm.interface_template_gui(
+                        widgets = ['plot'], 
+                        handles = [(self, 'qplot')], 
+                        datas = [data])
+                table_for_all_wells_template +=\
+                    lgm.interface_template_gui(
+                        widgets = ['panel'], 
+                        templates = [[table_plot_template]])
+
+                repheads, reprows, reptemps = self.calculate_rep_table()
+                table_for_reps_template =\
+                    lgm.interface_template_gui(
+                        layout = 'vertical', 
+                        widgets = ['table'], 
+                        labels = [[repheads, reprows]], 
+                        templates = [reptemps])
+                table_for_reps_template +=\
+                    lgm.interface_template_gui(
+                        widgets = ['button_set'], 
+                        bindings = [[lgb.create_reset_widgets_wrapper(
+                            window, self.recalculate_replicate_doubling)]], 
+                        labels = [['Recalculate Replicate Data']])
+                        
+                tablepages = [('Raw',[table_for_all_wells_template]), 
+                            ('Replicates', [table_for_reps_template])]
+		self.widg_templates.append(
+                    lgm.interface_template_gui(
+			widgets = ['tab_book'], 
+			pages = [tablepages], 
+			initials = [[self.current_tab_index_tablebook]], 
+			instances = [[self]], 
+			keys = [['current_tab_index_tablebook']]))
+
+                '''
                 self.widg_templates.append(
                         lgm.interface_template_gui(
                             widgets = ['check_set'], 
@@ -1011,6 +1159,7 @@ class optical_density_block(obs_data_block):
                         widgets = ['plot'], 
                         handles = [(self, 'qplot')], 
                         datas = [data])
+                '''
 		obs_data_block.set_settables(self, *args, from_sub = True)
 
 class data_pool(data_block):
@@ -1043,6 +1192,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		self.impose_default('input_data_file',in_dat,**kwargs)
 		self.impose_default('input_tmpl_file',in_tmp,**kwargs)
                 self.impose_default('significant_figures',3,**kwargs)
+                self.impose_default('reps_per_rep', '3', **kwargs)
+                self.impose_default('first_blank_well', None, **kwargs)
 		self.current_tab_index = 0
 		self.current_tab_index_outputs = 0
 		self.postprocess_plan = lpp.post_process_plan(
@@ -1159,7 +1310,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		front_page = lgm.interface_template_gui(
 				widgets = ['file_name_box'], 
 				layout = 'grid', 
-                                widg_positions = [(1,0)],
+                                widg_spans = [(1,2)], 
+                                widg_positions = [(2,0)],
 				keys = [['input_data_file']], 
 				instances = [[self]], 
                                 maximum_sizes = [[(50, 200)]], 
@@ -1169,7 +1321,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 				labels = [['Choose Filename']], 
 				box_labels = ['Input Data File'])
 		front_page += lgm.interface_template_gui( 
-                                widg_positions = [(2,0)],
+                                widg_positions = [(3,0)],
+                                widg_spans = [(1,2)], 
 				widgets = ['file_name_box'], 
 				keys = [['input_tmpl_file']], 
 				instances = [[self]], 
@@ -1179,6 +1332,26 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 					inpt_dir]], 
 				labels = [['Choose Filename']], 
 				box_labels = ['Input Template File'])
+                front_page += lgm.interface_template_gui(
+                                widg_positions = [(1,0)],
+                                widgets = ['radio'], 
+                                labels = [['2', '3', '4']], 
+                                box_labels = ['Replicas Per Replicate'], 
+                                initials = [[self.reps_per_rep]], 
+                                instances = [[self]], 
+                                keys = [['reps_per_rep']])
+                if hasattr(self, '_well_key_'):
+                    wells = self._well_key_
+                else: wells = []
+                front_page += lgm.interface_template_gui(
+                                widg_positions = [(1,1)],
+                                widgets = ['selector'], 
+                                instances = [[self]], 
+                                keys = [['first_blank_well']], 
+                                labels = [wells], 
+                                #labels = [self._well_key_], 
+                                box_labels = ['First Blank Well'], 
+                                initials = [[self.first_blank_well]])
 		front_page += lgm.interface_template_gui(
                                 widg_positions = [(0,0)], 
 				widgets = ['button_set'], 
