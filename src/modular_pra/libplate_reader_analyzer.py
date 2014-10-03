@@ -274,6 +274,9 @@ class obs_data_block(data_block):
 		self.apply_reductions()
                 #self._reduced_ = self.apply_reduction(self._unreduced_.data)
 		#self.update_replicate_reduction()
+
+
+                '''
                 blanks = lfu.uniqfy(pra.template_read['Blank Well'])
                 if not len(blanks) == 1:
                     print 'blank wells should not change identity!!'
@@ -281,6 +284,12 @@ class obs_data_block(data_block):
                 spl = blanks[0].split(' ')
                 rng = lm.make_range(spl[1])[0].split(',')
                 blanks = [''.join([spl[0], str(int(float(r)))]) for r in rng]
+                '''
+                rpr = int(pra.reps_per_rep)
+                if pra.first_blank_well is None:
+                    pra.first_blank_well = welkey[-1*rpr]
+                blanks = welkey[-1*rpr:]
+                self._blank_well_key_ = blanks
                 self.blank_well_filter(pra, blanks)
 
         def blank_well_filter(self, pra, blanks):
@@ -1190,7 +1199,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		in_dat = lset.get_setting('default_input_data')
 		in_tmp = lset.get_setting('default_input_template')
 		self.impose_default('input_data_file',in_dat,**kwargs)
-		self.impose_default('input_tmpl_file',in_tmp,**kwargs)
+		#self.impose_default('input_tmpl_file',in_tmp,**kwargs)
                 self.impose_default('significant_figures',3,**kwargs)
                 self.impose_default('reps_per_rep', '3', **kwargs)
                 self.impose_default('first_blank_well', None, **kwargs)
@@ -1203,9 +1212,9 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		self._children_ = [self.postprocess_plan]
 
 	def parse_inputs(self):
-		self.parse_template()
+		#self.parse_template()
 		self.parse_data()
-
+        '''
 	def parse_template(self):
 		fipath = self.input_tmpl_file
                 if not os.path.isfile(fipath):
@@ -1227,6 +1236,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 						read[h].append(b)
 		read['comments'] = comments
 		self.template_read = read
+        '''
 
 	def parse_data(self):
 
@@ -1320,6 +1330,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 					inpt_dir]], 
 				labels = [['Choose Filename']], 
 				box_labels = ['Input Data File'])
+                '''
 		front_page += lgm.interface_template_gui( 
                                 widg_positions = [(3,0)],
                                 widg_spans = [(1,2)], 
@@ -1332,6 +1343,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 					inpt_dir]], 
 				labels = [['Choose Filename']], 
 				box_labels = ['Input Template File'])
+                '''
                 front_page += lgm.interface_template_gui(
                                 widg_positions = [(1,0)],
                                 widgets = ['radio'], 
@@ -1343,6 +1355,9 @@ class plate_reader_analyzer(lfu.modular_object_qt):
                 if hasattr(self, '_well_key_'):
                     wells = self._well_key_
                 else: wells = []
+                if self.first_blank_well is None and wells:
+                    self.first_blank_well = wells[-1*self.reps_per_rep]
+                    print 'FIST BLANK WELL', self.first_blank_well
                 front_page += lgm.interface_template_gui(
                                 widg_positions = [(1,1)],
                                 widgets = ['selector'], 
@@ -1359,8 +1374,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 				bindings = [[lgb.create_reset_widgets_wrapper(
 						window, self.parse_inputs), 
 					self.analyze_data, self.produce_output]], 
-				labels = [['Parse Input Files', 
-					'Analyze Parsed Data', 'Produce Output']])
+				labels = [['Parse Input File', 
+				    'Analyze Parsed Data', 'Produce Output']])
 		pages = [('Main', [front_page])]
 		output_pages = []
 		if hasattr(self, 'read'):
