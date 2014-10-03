@@ -780,7 +780,6 @@ class well_data(object):
                     infl_dex = sigmoid_2nd_deriv.index(infl_deriv)
                     inflect = sigdatdom[infl_dex]
                     #inflect = poptsi[4]*60.0
-                    print 'inflection!', inflect, self.well_id
                     inflectdelts = [abs(t_ - inflect) for t_ in t]
                     inflectdex = inflectdelts.index(min(inflectdelts))
                     try: mi = vals[inflectdex]
@@ -1357,7 +1356,6 @@ class plate_reader_analyzer(lfu.modular_object_qt):
                 else: wells = []
                 if self.first_blank_well is None and wells:
                     self.first_blank_well = wells[-1*self.reps_per_rep]
-                    print 'FIST BLANK WELL', self.first_blank_well
                 front_page += lgm.interface_template_gui(
                                 widg_positions = [(1,1)],
                                 widgets = ['selector'], 
