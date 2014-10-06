@@ -354,21 +354,59 @@ class obs_data_block(data_block):
                 #else: d.scalars = odb.scalars[:]
             return unred
 
+        # i have RFU/OD vs time
+        # set a bin axis of OD values
+        # for every (RFU, OD, time) triplet
+        # determine bin for RFU or RFU/OD, whatever is in unred
+        # average each bin to get one value
+        #  the average RFU or RFU/OD at that OD
         def apply_versus_od_reduction(self, unred):
             od_block = self.parent.get_OD_block()
             od_data = lfu.data_container(data = dcopy(od_block._all_data_))
             od_data = od_block.reduce_data(od_data,False, 
                 self.timept_filtered, self.background_subtracted, 
-                self.phase_reduced, self.replicate_reduced, 
+                self.phase_reduced, False, 
+                #self.phase_reduced, self.replicate_reduced, 
                 False, False)
 
-            for d,dod in zip(unred.data,od_data.data):
-                if d.label in self._well_key_:
-                    d.override_domain = True
-                    d.domain = dod.scalars
-                    if len(d.domain) != len(d.scalars):
-                        pdb.set_trace()
-            return unred
+            self.bin_count = 10
+            self.ordered = False
+            relevant = self._well_key_
+            dlabs = [d.label for d in unred.data]
+            final_data = []
+            all_bin_axes = []
+            for da in od_data.data:
+                dlab = da.label
+                if dlab in relevant:
+                    ddx = dlabs.index(dlab)
+                    bin_axis = od_data.data[ddx]
+                    all_bin_axes.append(bin_axis)
+            for da in unred.data:
+                dlab = da.label
+                if dlab in relevant:
+                    ddx = dlabs.index(dlab)
+                    dat_axes = [unred.data[ddx]]
+                    bin_axes = [od_data.data[ddx]]
+                    bins, vals = lpp.bin_scalars(bin_axes, 
+                            dat_axes, self.bin_count, self.ordered, 
+                            bin_basis_override = all_bin_axes)
+                    mevals = [np.mean(va) if va else -1 for va in vals]
+                    final_data.append(ldc.scalars(
+                        label = dlab, scalars = mevals))
+                else:
+                    print 'wtf', dlab, relevant
+                    
+            bindat = ldc.scalars(label = 'OD-bins', scalars = bins)
+            final_data.insert(0,bindat)
+            return lfu.data_container(data = final_data)
+
+            #for d,dod in zip(unred.data,od_data.data):
+            #    if d.label in self._well_key_:
+            #        d.override_domain = True
+            #        d.domain = dod.scalars
+            #        if len(d.domain) != len(d.scalars):
+            #            pdb.set_trace()
+            #return unred
 
         def apply_timept_flags_OD(self, unred):
             pra = self.parent.parent
@@ -395,12 +433,39 @@ class obs_data_block(data_block):
 
         #consider broken!
 	def apply_replicate_reduction(self, unred):
-		read = self.parent.parent.read['layout'].read
-		flat = lfu.flatten(read['table'])
-		well_cnt = len(flat)
-		reduced = unred.data[:len(unred.data)-well_cnt]	#list of replicate averaged scalers
-		con_offset = len(reduced)
-		uniq = lfu.uniqfy(flat)
+                pra = self.parent.parent
+                wells = self._well_key_
+                reps = self.determine_replicates(pra, wells)
+                replicates = [[] for x in range(len(reps))]
+                for well in wells:
+                    dater = lfu.grab_mobj_by_name(well,unred.data)
+                    repdx = [re.count(well) > 0 for re in reps].index(True)
+                    replicates[repdx].append(dater)
+                final_data = []
+                for da in unred.data:
+                    if not da.label in self._well_key_:
+                        final_data.append(da)
+                for re, rep in zip(reps, replicates):
+		    zi = zip(*[r.scalars for r in rep])
+		    repme = np.array([np.mean(z) for z in zi])
+                    newd = ldc.scalars(label = re, scalars = repme)
+                    final_data.append(newd)
+                return lfu.data_container(data = final_data)
+                
+                '''#
+		#read = self.parent.parent.read['layout'].read
+		#flat = lfu.flatten(read['table'])
+		#well_cnt = len(flat)
+		#reduced = unred.data[:len(unred.data)-well_cnt]	#list of replicate averaged scalers
+		#con_offset = len(reduced)
+		#uniq = lfu.uniqfy(flat)
+
+                
+                con_offset = len(self.cond_mobjs)
+                pra = self.parent.parent
+                wells = self._well_key_
+                uniq = self.determine_replicates(pra, wells)
+                pdb.set_trace()
 		layout = OrderedDict()
 		for dex, key in enumerate(flat):
 			if key in layout.keys(): layout[key].append(dex + con_offset)
@@ -415,6 +480,7 @@ class obs_data_block(data_block):
 		reduced.extend(new)
 		red = lfu.data_container(data = reduced)
 		return red
+                '''#
 
         def apply_background_subtraction(self, unred):
             def smart_subtract(val):
@@ -475,35 +541,21 @@ class obs_data_block(data_block):
                 self.tf_f_cutout = (unredlen - unredlenpost) / unredtot
             else: self.tf_f_cutout = 0.0
             if bgs_f:
-                #unredlen = len(unred.data[0].scalars)
                 unred = self.apply_background_subtraction(unred)
-                #unredlenpost = len(unred.data[0].scalars)
-                #self.bgs_cutout = (unredlen - unredlenpost) / unredtot
-            #else: self.bgs_cutout = 0.0
             if phr_f:
                 unredlen = len(unred.data[0].scalars)
                 unred = self.apply_phase_reduction(unred)
                 unredlenpost = len(unred.data[0].scalars)
                 self.phr_f_cutout = (unredlen - unredlenpost) / unredtot
             else: self.phr_f_cutout = 0.0
-            if rred_f:
-                #unredlen = len(unred.data[0].scalars)
-                unred = self.apply_replicate_reduction(unred)
-                #unredlenpost = len(unred.data[0].scalars)
-                #self.rred_f_cutout = (unredlen - unredlenpost) / unredtot
-            #else: self.rred_f_cutout = 0.0
             if nred_f:
-                #unredlen = len(unred.data[0].scalars)
                 unred = self.apply_normalization_RFU(unred)
-                #unredlenpost = len(unred.data[0].scalars)
-                #self.nred_f_cutout = (unredlen - unredlenpost) / unredtot
-            #else: self.nred_f_cutout = 0.0
+            #if rred_f:
+            #    unred = self.apply_replicate_reduction(unred)
             if domo_f:
-                #unredlen = len(unred.data[0].scalars)
                 unred = self.apply_versus_od_reduction(unred)
-                #unredlenpost = len(unred.data[0].scalars)
-                #self.domo_f_cutout = (unredlen - unredlenpost) / unredtot
-            #else: self.domo_f_cutout = 0.0
+            if rred_f:
+                unred = self.apply_replicate_reduction(unred)
             return unred
 
         def apply_reductions(self):
@@ -1196,9 +1248,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		    	filename = 'plate_reader_analyzer_settings.txt')
 		self.settings = self.settings_manager.read_settings()
 		in_dat = lset.get_setting('default_input_data')
-		in_tmp = lset.get_setting('default_input_template')
 		self.impose_default('input_data_file',in_dat,**kwargs)
-		#self.impose_default('input_tmpl_file',in_tmp,**kwargs)
                 self.impose_default('significant_figures',3,**kwargs)
                 self.impose_default('reps_per_rep', '3', **kwargs)
                 self.impose_default('first_blank_well', None, **kwargs)
@@ -1209,33 +1259,6 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		self.postprocess_plan._display_for_children_ = True
 		lfu.modular_object_qt.__init__(self, *args, **kwargs)
 		self._children_ = [self.postprocess_plan]
-
-	def parse_inputs(self):
-		#self.parse_template()
-		self.parse_data()
-        '''
-	def parse_template(self):
-		fipath = self.input_tmpl_file
-                if not os.path.isfile(fipath):
-			print 'cannot find template file:', self.input_tmpl_file
-			return
-		with open(fipath, 'r') as handle: lines = handle.readlines()
-		read = OrderedDict()
-		comments = []
-		for li in lines:
-			l = li.strip()
-			if l.startswith('#'): comments.append(l)
-			elif not l == '':
-				if l.startswith('<') and l.endswith('>'):
-					head = l[1:-1].split(',')
-					for h in head: read[h] = []
-				else:
-					body = l.split(',')
-					for h, b in zip(read.keys(), body):
-						read[h].append(b)
-		read['comments'] = comments
-		self.template_read = read
-        '''
 
 	def parse_data(self):
 
@@ -1370,7 +1393,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 				widgets = ['button_set'], 
 				layouts = ['horizontal'], 
 				bindings = [[lgb.create_reset_widgets_wrapper(
-						window, self.parse_inputs), 
+						window, self.parse_data), 
 					self.analyze_data, self.produce_output]], 
 				labels = [['Parse Input File', 
 				    'Analyze Parsed Data', 'Produce Output']])

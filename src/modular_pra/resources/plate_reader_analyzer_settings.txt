@@ -21,7 +21,6 @@ fitting_aware = False
 
 <input_data>
 default_input_data = none
-default_input_template = none
 
 
 
