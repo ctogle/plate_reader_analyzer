@@ -5,7 +5,7 @@ import modular_core.libmath as lm
 #import modular_core.libgeometry as lgeo
 import modular_core.libdatacontrol as ldc
 import modular_core.libpostprocess as lpp
-#import libs.plate_reader_analyzer.libplatereaderprocesses as lpdap
+import modular_pra.libplatereaderprocesses as lpdap
 
 from collections import OrderedDict
 import numpy as np
@@ -126,6 +126,7 @@ class obs_data_block(data_block):
                 self.impose_default('phase_type', 'Log', **kwargs) 
                 self.impose_default('override_domains_with_OD', False, **kwargs)
                 self.impose_default('override_thresholds', False, **kwargs)
+                self.impose_default('bin_count', 10, **kwargs)
 		blks = args[0]
 		raw = blks[0].raw + blks[1].raw
 		data_block.__init__(self, *(raw,), **kwargs)
@@ -369,8 +370,10 @@ class obs_data_block(data_block):
                 #self.phase_reduced, self.replicate_reduced, 
                 False, False)
 
-            self.bin_count = 10
-            self.ordered = False
+            #self.bin_count = 10
+            #self.ordered = False
+            bcount = self.bin_count
+            ordered = False
             relevant = self._well_key_
             dlabs = [d.label for d in unred.data]
             final_data = []
@@ -388,25 +391,20 @@ class obs_data_block(data_block):
                     dat_axes = [unred.data[ddx]]
                     bin_axes = [od_data.data[ddx]]
                     bins, vals = lpp.bin_scalars(bin_axes, 
-                            dat_axes, self.bin_count, self.ordered, 
+                            dat_axes, bcount, ordered, 
                             bin_basis_override = all_bin_axes)
                     mevals = [np.mean(va) if va else -1 for va in vals]
+                    sdvals = [np.std(va) if va else -1 for va in vals]
+                    stdu = [v+s for v,s in zip(mevals,sdvals)]
+                    stdd = [v-s for v,s in zip(mevals,sdvals)]
+                    stds = [stdu, stdd]
                     final_data.append(ldc.scalars(
-                        label = dlab, scalars = mevals))
-                else:
-                    print 'wtf', dlab, relevant
+                        label = dlab, scalars = mevals, 
+                        subscalars = stds))
                     
             bindat = ldc.scalars(label = 'OD-bins', scalars = bins)
             final_data.insert(0,bindat)
             return lfu.data_container(data = final_data)
-
-            #for d,dod in zip(unred.data,od_data.data):
-            #    if d.label in self._well_key_:
-            #        d.override_domain = True
-            #        d.domain = dod.scalars
-            #        if len(d.domain) != len(d.scalars):
-            #            pdb.set_trace()
-            #return unred
 
         def apply_timept_flags_OD(self, unred):
             pra = self.parent.parent
@@ -431,7 +429,6 @@ class obs_data_block(data_block):
                 d.scalars = subd
             return unred
 
-        #consider broken!
 	def apply_replicate_reduction(self, unred):
                 pra = self.parent.parent
                 wells = self._well_key_
@@ -448,40 +445,14 @@ class obs_data_block(data_block):
                 for re, rep in zip(reps, replicates):
 		    zi = zip(*[r.scalars for r in rep])
 		    repme = np.array([np.mean(z) for z in zi])
-                    newd = ldc.scalars(label = re, scalars = repme)
+                    stdu = np.array([r + np.std(z) for r,z in zip(repme,zi)])
+                    stdd = np.array([r - np.std(z) for r,z in zip(repme,zi)])
+                    stds = [stdu, stdd]
+                    newd = ldc.scalars(label = re, 
+                        scalars = repme, subscalars = stds)
                     final_data.append(newd)
                 return lfu.data_container(data = final_data)
                 
-                '''#
-		#read = self.parent.parent.read['layout'].read
-		#flat = lfu.flatten(read['table'])
-		#well_cnt = len(flat)
-		#reduced = unred.data[:len(unred.data)-well_cnt]	#list of replicate averaged scalers
-		#con_offset = len(reduced)
-		#uniq = lfu.uniqfy(flat)
-
-                
-                con_offset = len(self.cond_mobjs)
-                pra = self.parent.parent
-                wells = self._well_key_
-                uniq = self.determine_replicates(pra, wells)
-                pdb.set_trace()
-		layout = OrderedDict()
-		for dex, key in enumerate(flat):
-			if key in layout.keys(): layout[key].append(dex + con_offset)
-			else: layout[key] = [dex + con_offset]
-		new = ldc.scalars_from_labels(layout.keys())
-		for ndex, key in enumerate(layout.keys()):
-			rel_dexes = layout[key]
-			rel_dater = [unred.data[d] for d in rel_dexes]
-			#rel_dater = [unred[d] for d in rel_dexes]
-			zi = zip(*[r.scalars for r in rel_dater])
-			new[ndex].scalars = np.array([np.mean(z) for z in zi])
-		reduced.extend(new)
-		red = lfu.data_container(data = reduced)
-		return red
-                '''#
-
         def apply_background_subtraction(self, unred):
             def smart_subtract(val):
                 if val < 0.0: return self.fake_zero_value
@@ -516,14 +487,10 @@ class obs_data_block(data_block):
             else:
                 print 'UNKNOWN PHASE TYPE CHOICE', self.phase_type
                 return unred
-            #filtered = []
             for d in unred.data:
                 subd = d.scalars[start:stop]
                 d.scalars = subd
-                #filt = ldc.scalars(label = d.label, scalars = subd)
-                #filtered.append(filt)
             return unred
-            #return lfu.data_container(data = filtered)
 
         def reduce_data(self, unred, tf_od_f, tf_f, 
                 bgs_f, phr_f, rred_f, nred_f, domo_f):
@@ -550,8 +517,6 @@ class obs_data_block(data_block):
             else: self.phr_f_cutout = 0.0
             if nred_f:
                 unred = self.apply_normalization_RFU(unred)
-            #if rred_f:
-            #    unred = self.apply_replicate_reduction(unred)
             if domo_f:
                 unred = self.apply_versus_od_reduction(unred)
             if rred_f:
@@ -565,6 +530,10 @@ class obs_data_block(data_block):
                 self.phase_reduced, self.replicate_reduced, 
                 self.normalized_reduced, self.override_domains_with_OD)
             self.data = unred
+            def hellow(): print 'im a callback!'
+            self.data.user_callbacks = {
+                    'change_x_domain' : hellow, 
+                            }
             self.capture_targets = [x.label for x in self.data.data]
             self.output.rewidget(True)
 
@@ -658,10 +627,15 @@ class obs_data_block(data_block):
 				keys = [['override_domains_with_OD']], 
 				callbacks = [[lgb.create_reset_widgets_wrapper(
 				    window, self.apply_reductions)]]))
-                    #self.widg_templates[-1] += lgm.interface_template_gui(
-                    #        widgets = ['text'], 
-                    #        read_only = [True], 
-                    #        initials = [[self.domo_f_cutout]])
+                    self.widg_templates[-1] += lgm.interface_template_gui(
+                            widgets = ['spin'], 
+                            initials = [[self.bin_count]], 
+                            instances = [[self]], 
+                            keys = [['bin_count']], 
+                            box_labels = ['Number of OD Bins'], 
+                            single_steps = [[1]], 
+                            minimum_values = [[1]], 
+                            maximum_values = [[100]])
 		    self.widg_templates.append(
 			lgm.interface_template_gui(
                                 layout = 'horizontal', 
@@ -704,12 +678,26 @@ class obs_data_block(data_block):
                         for well in blnk_well_ids]
                 badfracvalues = [[self.blankwell_outliers[ke]] 
                                     for ke in blnk_well_ids]
-                self.widg_templates[-1] += lgm.interface_template_gui(
-                        widgets = ['text','text','text','text'], 
-                        read_only = [True, True, True, True], 
-                        box_labels = ['% Of Data Removed By Outlier Removal'] +\
-                                        badfraclabels, 
-                        initials = [[self.tf_f_cutout]]+[b for b in badfracvalues])
+                badfrac_templates = [
+                    lgm.interface_template_gui(
+                        widgets = ['text'],
+                        read_only = [True], 
+                        box_labels = [bflab], 
+                        initials = [bfval]) for bflab,bfval 
+                            in zip(badfraclabels, badfracvalues)]
+                self.widg_templates[-1] +=\
+                    lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        box_labels = ['% Of Data Removed By Outlier Removal'], 
+                        initials = [[self.tf_f_cutout]])
+                for bft in badfrac_templates: self.widg_templates[-1] += bft
+                #self.widg_templates[-1] += lgm.interface_template_gui(
+                #        widgets = ['text','text','text','text'], 
+                #        read_only = [True, True, True, True], 
+                #        box_labels = ['% Of Data Removed By Outlier Removal'] +\
+                #                        badfraclabels, 
+                #        initials = [[self.tf_f_cutout]]+[b for b in badfracvalues])
 		self.widg_templates.append(
 			lgm.interface_template_gui(
                                 layout = 'horizontal', 
@@ -1254,6 +1242,7 @@ class plate_reader_analyzer(lfu.modular_object_qt):
                 self.impose_default('first_blank_well', None, **kwargs)
 		self.current_tab_index = 0
 		self.current_tab_index_outputs = 0
+		#self.postprocess_plan = lpp.post_process_plan(
 		self.postprocess_plan = lpp.post_process_plan(
 			label = 'Post Process Plan', parent = self)
 		self.postprocess_plan._display_for_children_ = True
@@ -1315,7 +1304,10 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 		try:
 			print 'performing analysis...'
 			check = time.time()
-			self.postprocess_plan(self)
+                        #pdb.set_trace()
+                        dpool = []
+                        #dpool = self._always_sourceable_
+			self.postprocess_plan(self, dpool)
 			print 'duration of analysis: ', time.time() - check
 			return True
 		except:
@@ -1331,6 +1323,15 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 				dat.provide_axes_manager_input()
 				dat.output(dat.data)
 			else: print 'skipping output...', dat.output.label
+                ppplan = self.postprocess_plan
+                for pp in ppplan.post_processes:
+                    ppout = pp.output
+                    if ppout.must_output():
+		        pp.provide_axes_manager_input()
+                        data_ = lfu.data_container(data = pp.data)
+                        #pp.determine_regime(self)
+                        pp.output(data_)
+                        #ppout(pp.data)
 		print 'produced output: ', time.time() - check_0
 
 	def open_file(self):
@@ -1404,13 +1405,13 @@ class plate_reader_analyzer(lfu.modular_object_qt):
 				bl.output.widg_templates)) 
 				for bl in self.read['data'].data]
 		for proc in self.postprocess_plan.post_processes:
-			try:
-				output_pages.append((proc.label, 
-					proc.output.widg_templates))
-			except AttributeError:
-				proc.output.set_settables(*args, **kwargs)
-				output_pages.append((proc.label, 
-					proc.output.widg_templates))
+			#try:
+			#	output_pages.append((proc.label, 
+			#		proc.output.widg_templates))
+			#except AttributeError:
+			proc.output.set_settables(*args, **kwargs)
+			output_pages.append((proc.label, 
+				proc.output.widg_templates))
 		output_tabs = lgm.interface_template_gui(
 			widgets = ['tab_book'], 
 			pages = [output_pages], 
