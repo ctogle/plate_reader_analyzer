@@ -5,6 +5,7 @@ import modular_core.libmath as lm
 #import modular_core.libgeometry as lgeo
 import modular_core.libdatacontrol as ldc
 import modular_core.libpostprocess as lpp
+import modular_core.libhtmloutput as lht
 import modular_pra.libplatereaderprocesses as lpdap
 
 from collections import OrderedDict
@@ -127,6 +128,8 @@ class obs_data_block(data_block):
                 self.impose_default('override_domains_with_OD', False, **kwargs)
                 self.impose_default('override_thresholds', False, **kwargs)
                 self.impose_default('bin_count', 10, **kwargs)
+                self.impose_default('bin_min_override', 0.2, **kwargs)
+                self.impose_default('bin_max_override', 1.0, **kwargs)
 		blks = args[0]
 		raw = blks[0].raw + blks[1].raw
 		data_block.__init__(self, *(raw,), **kwargs)
@@ -355,12 +358,6 @@ class obs_data_block(data_block):
                 #else: d.scalars = odb.scalars[:]
             return unred
 
-        # i have RFU/OD vs time
-        # set a bin axis of OD values
-        # for every (RFU, OD, time) triplet
-        # determine bin for RFU or RFU/OD, whatever is in unred
-        # average each bin to get one value
-        #  the average RFU or RFU/OD at that OD
         def apply_versus_od_reduction(self, unred):
             od_block = self.parent.get_OD_block()
             od_data = lfu.data_container(data = dcopy(od_block._all_data_))
@@ -370,8 +367,6 @@ class obs_data_block(data_block):
                 #self.phase_reduced, self.replicate_reduced, 
                 False, False)
 
-            #self.bin_count = 10
-            #self.ordered = False
             bcount = self.bin_count
             ordered = False
             relevant = self._well_key_
@@ -382,25 +377,32 @@ class obs_data_block(data_block):
                 dlab = da.label
                 if dlab in relevant:
                     ddx = dlabs.index(dlab)
-                    bin_axis = od_data.data[ddx]
+                    bin_axis = dcopy(od_data.data[ddx])
                     all_bin_axes.append(bin_axis)
             for da in unred.data:
                 dlab = da.label
                 if dlab in relevant:
                     ddx = dlabs.index(dlab)
-                    dat_axes = [unred.data[ddx]]
-                    bin_axes = [od_data.data[ddx]]
+                    dat_axes = [dcopy(unred.data[ddx])]
+                    bin_axes = [dcopy(od_data.data[ddx])]
+                    bin_min = self.bin_min_override
+                    bin_max = self.bin_max_override
                     bins, vals = lpp.bin_scalars(bin_axes, 
                             dat_axes, bcount, ordered, 
-                            bin_basis_override = all_bin_axes)
-                    mevals = [np.mean(va) if va else -1 for va in vals]
-                    sdvals = [np.std(va) if va else -1 for va in vals]
+                            bin_min = bin_min, bin_max = bin_max)
+                            #bin_basis_override = all_bin_axes)
+                    mevals = [np.mean(va) if va else None for va in vals]
+                    sdvals = [np.std(va) if va else None for va in vals]
+                    dbins = [b for b,v in zip(bins,mevals) if not v is None]
+                    mevals = [v for v in mevals if not v is None]
+                    sdvals = [v for v in sdvals if not v is None]
                     stdu = [v+s for v,s in zip(mevals,sdvals)]
                     stdd = [v-s for v,s in zip(mevals,sdvals)]
                     stds = [stdu, stdd]
                     final_data.append(ldc.scalars(
                         label = dlab, scalars = mevals, 
-                        subscalars = stds))
+                        subscalars = stds))#, domain = dbins, 
+                        #override_domain = True))
                     
             bindat = ldc.scalars(label = 'OD-bins', scalars = bins)
             final_data.insert(0,bindat)
@@ -530,10 +532,10 @@ class obs_data_block(data_block):
                 self.phase_reduced, self.replicate_reduced, 
                 self.normalized_reduced, self.override_domains_with_OD)
             self.data = unred
-            def hellow(): print 'im a callback!'
-            self.data.user_callbacks = {
-                    'change_x_domain' : hellow, 
-                            }
+            #def hellow(): print 'im a callback!'
+            #self.data.plt_callbacks = {
+            #        'change_x_domain' : hellow, 
+            #                }
             self.capture_targets = [x.label for x in self.data.data]
             self.output.rewidget(True)
 
@@ -628,14 +630,21 @@ class obs_data_block(data_block):
 				callbacks = [[lgb.create_reset_widgets_wrapper(
 				    window, self.apply_reductions)]]))
                     self.widg_templates[-1] += lgm.interface_template_gui(
-                            widgets = ['spin'], 
-                            initials = [[self.bin_count]], 
-                            instances = [[self]], 
-                            keys = [['bin_count']], 
-                            box_labels = ['Number of OD Bins'], 
-                            single_steps = [[1]], 
-                            minimum_values = [[1]], 
-                            maximum_values = [[100]])
+                            widgets = ['spin', 'spin', 'spin'], 
+                            doubles = [[False], [True], [True]], 
+                            initials = [[self.bin_count], 
+                                [self.bin_min_override], 
+                                [self.bin_max_override]], 
+                            instances = [[self], [self], [self]], 
+                            keys = [['bin_count'], 
+                                ['bin_min_override'], 
+                                ['bin_max_override']], 
+                            box_labels = ['Number of OD Bins', 
+                                'Lower Domain Bound', 
+                                'Upper Domain Bound'], 
+                            single_steps = [[1], [0.01], [0.01]], 
+                            minimum_values = [[1], [0.0], [0.01]], 
+                            maximum_values = [[100], [9.99], [10.0]])
 		    self.widg_templates.append(
 			lgm.interface_template_gui(
                                 layout = 'horizontal', 
@@ -1031,6 +1040,40 @@ class optical_density_block(obs_data_block):
                 reptemps.append(rotemps)
             return repheads, reprows, reptemps
 
+        def output_html_od_data_table(self):
+            wobjs = [self.well_mobjs[ke] for 
+                ke in self._well_key_]
+            atts = ['well_id', 
+                    'lo_thresh', 
+                    'mi_thresh', 
+                    'hi_thresh', 
+                    'dtime', 
+                    'grate']
+            heads = ['Well', 
+                'Low OD Cutoff', 
+                'Middle OD Cutoff', 
+                'High OD Cutoff', 
+                'Doubling Time', 
+                'Growth Rate']
+            finame = 'somemorehtml'
+            lht.create_table(wobjs, atts, heads, finame)
+
+        def output_html_replicate_table(self):
+            wobjs = [self.replicate_mobjs[ke] for 
+                ke in self._replicate_key_]
+            atts = ['replicate_id', 
+                    'mean_doubling_time', 
+                    'mean_growth_rate', 
+                    'stddev_doubling_time', 
+                    'stddev_growth_rate']
+            heads = ['Replicate', 
+                'Mean Doubling Time', 
+                'Mean Growth Rate', 
+                'Stddev Of Doubling Time', 
+                'Stddev Of Growth Rate']
+            finame = 'somehtml'
+            lht.create_table(wobjs, atts, heads, finame)
+
 	def set_settables(self, *args, **kwargs):
 		window = args[0]
 		self.handle_widget_inheritance(*args, **kwargs)
@@ -1038,13 +1081,15 @@ class optical_density_block(obs_data_block):
                     lgm.interface_template_gui(
 		        widgets = ['button_set'], 
 			bindings = [[
+                            self.output_html_od_data_table, 
                             [lgb.create_reset_widgets_wrapper(
                                 window, self.recalculate_doubling),
                                     self.redraw_plot], 
                             [lgb.create_reset_widgets_wrapper(
                                 window, self.impose_global_thresholds), 
                                     self.redraw_plot]]], 
-			labels = [['Recalculate Doubling Times', 
+			labels = [['Output Table As html', 
+                            'Recalculate Doubling Times', 
                             'Impose Global Thresholds']]))
                 wobjs = self.well_mobjs
                 heads = ['Low OD Cutoff', 'Middle OD Cutoff', 
@@ -1171,8 +1216,10 @@ class optical_density_block(obs_data_block):
                     lgm.interface_template_gui(
                         widgets = ['button_set'], 
                         bindings = [[lgb.create_reset_widgets_wrapper(
-                            window, self.recalculate_replicate_doubling)]], 
-                        labels = [['Recalculate Replicate Data']])
+                            window, self.recalculate_replicate_doubling), 
+                            self.output_html_replicate_table]], 
+                        labels = [['Recalculate Replicate Data', 
+                            'Output Table as html']])
                         
                 tablepages = [('Raw',[table_for_all_wells_template]), 
                             ('Replicates', [table_for_reps_template])]
@@ -1328,7 +1375,8 @@ class plate_reader_analyzer(lfu.modular_object_qt):
                     ppout = pp.output
                     if ppout.must_output():
 		        pp.provide_axes_manager_input()
-                        data_ = lfu.data_container(data = pp.data)
+                        data_ = lfu.data_container(data = pp.data, 
+                                plt_callbacks = pp.plt_callbacks)
                         #pp.determine_regime(self)
                         pp.output(data_)
                         #ppout(pp.data)

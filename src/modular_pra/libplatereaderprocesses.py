@@ -10,7 +10,7 @@ import pdb
 class post_process_plate_reader(lpp.post_process):
     def provide_axes_manager_input(self, lp = True, cp = False, 
             bp = False, vp = False, tp = True, x_title = 'x-title', 
-            y_title = 'y-title', title = 'title'):
+            y_title = 'y-title', title = 'title', plt_callbacks = None):
         self.use_line_plot = lp
         self.use_color_plot = cp
         self.use_bar_plot = bp
@@ -20,6 +20,12 @@ class post_process_plate_reader(lpp.post_process):
         #meas = self._measurement_
         self.y_title = y_title
         self.title = y_title
+        if plt_callbacks is None:plt_callbacks = {}
+        self.plt_callbacks = plt_callbacks
+        #self.plt_callbacks = {
+        #    'change_y_domain':self.hello}
+
+    #def hello(self): print 'hey there!'
 
     def start_pool(self, *args, **kwargs):
         #pool = []
@@ -55,6 +61,12 @@ class post_process_plate_reader(lpp.post_process):
 
 class post_process_ratios(post_process_plate_reader):
 
+    def provide_axes_manager_input(self, *args, **kwargs):
+        cbs = {
+            'change_y_domain':self.update}
+        kwargs['plt_callbacks'] = cbs
+        post_process_plate_reader.provide_axes_manager_input(self,*args,**kwargs)
+
     def __init__(self, *args, **kwargs):
         if not 'base_class' in kwargs.keys():
             kwargs['base_class'] =\
@@ -71,24 +83,28 @@ class post_process_ratios(post_process_plate_reader):
         #self.impose_default('function_of', None, **kwargs)
         post_process_plate_reader.__init__(self, *args, **kwargs)
 
+    def update(self, *args, **kwargs):
+        combo = args[0]
+        comdx = combo.currentIndex()
+        self.rat_domain = combo.itemText(comdx)
+        updated = self.ratios(*self.raw, **kwargs)
+        for da in self.data[0]:
+            up = lfu.grab_mobj_by_name(da.label, updated)
+            da.scalars = up.scalars
+
     def postproc(self, *args, **kwargs):
         kwargs['method'] = self.ratios
         post_process_plate_reader.postproc(self, *args, **kwargs)
 
     def ratios(self, *args, **kwargs):
         pool = args[0][0]
-        
-        #self.x_domain = 'Time'
-        #self.rat_domain = pool[2].label
-
-        print 'xdom!', self.x_domain
-        print 'ratdom!', self.rat_domain
+        self.raw = args
         trudom = self.x_domain
         rat_domain = lfu.grab_mobj_by_name(self.rat_domain, pool)
         rdomv = rat_domain.scalars
         dlabs = [d.label for d in pool]
         data = ldc.scalars_from_labels(dlabs)
-        def div(u,v):return v/u if not u == 0.0 else 10000000000
+        def div(u,v):return v/u if not u == 0.0 else float(10000000000)
         for dx in range(len(data)):
             if data[dx].label == trudom:
                 data[dx].scalars = pool[dx].scalars[:]
