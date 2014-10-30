@@ -899,6 +899,10 @@ class optical_density_block(obs_data_block):
 		self.impose_default('OD_threshold_middle', 0.6)
 		self.impose_default('OD_threshold_high', 1.0)
                 self.impose_default('selected_row',None)
+		self.impose_default('doubling_time_html_filename',
+                    'doubling_times.html', **kwargs)
+		self.impose_default('replicate_doubling_time_html_filename',
+                    'replicate_avgd_doubling_times.html', **kwargs)
 		self.current_tab_index_tablebook = 0
 		#lo = 0.05
 		#hi = 0.7
@@ -1055,7 +1059,7 @@ class optical_density_block(obs_data_block):
                 'High OD Cutoff', 
                 'Doubling Time', 
                 'Growth Rate']
-            finame = 'somemorehtml'
+            finame = self.doubling_time_html_filename
             lht.create_table(wobjs, atts, heads, finame)
 
         def output_html_replicate_table(self):
@@ -1071,15 +1075,17 @@ class optical_density_block(obs_data_block):
                 'Mean Growth Rate', 
                 'Stddev Of Doubling Time', 
                 'Stddev Of Growth Rate']
-            finame = 'somehtml'
+            finame = self.replicate_doubling_time_html_filename
             lht.create_table(wobjs, atts, heads, finame)
 
 	def set_settables(self, *args, **kwargs):
 		window = args[0]
 		self.handle_widget_inheritance(*args, **kwargs)
-		self.widg_templates.append(
-                    lgm.interface_template_gui(
+		#self.widg_templates.append(
+                dtime_table_buttons_template = lgm.interface_template_gui(
+                        layout = 'horizontal', 
 		        widgets = ['button_set'], 
+                        layouts = ['vertical'], 
 			bindings = [[
                             self.output_html_od_data_table, 
                             [lgb.create_reset_widgets_wrapper(
@@ -1090,7 +1096,22 @@ class optical_density_block(obs_data_block):
                                     self.redraw_plot]]], 
 			labels = [['Output Table As html', 
                             'Recalculate Doubling Times', 
-                            'Impose Global Thresholds']]))
+                            'Impose Global Thresholds']])#)
+		inpt_dir = os.getcwd()
+                #self.widg_templates[-1] +=\
+                dtime_table_buttons_template += lgm.interface_template_gui(
+			widgets = ['file_name_box'], 
+			#layout = 'grid', 
+                        #widg_spans = [(1,2)], 
+                        #widg_positions = [(2,0)],
+			keys = [['doubling_time_html_filename']], 
+			instances = [[self]], 
+                        maximum_sizes = [[(50, 200)]], 
+			initials = [[self.doubling_time_html_filename, 
+				'Possible Inputs (*.html)', 
+				inpt_dir]], 
+			labels = [['Choose Filename']], 
+			box_labels = ['Doubling Time Table Filename'])
                 wobjs = self.well_mobjs
                 heads = ['Low OD Cutoff', 'Middle OD Cutoff', 
                     'High OD Cutoff', 'Doubling Time', 'Growth Rate']
@@ -1202,8 +1223,14 @@ class optical_density_block(obs_data_block):
                         datas = [data])
                 table_for_all_wells_template +=\
                     lgm.interface_template_gui(
-                        widgets = ['panel'], 
-                        templates = [[table_plot_template]])
+                        #layout = 'vertical', 
+                        #layouts = ['vertical'], 
+                        widgets = ['splitter'], 
+                        orientations = [['vertical']], 
+                        #widgets = ['panel'], 
+                        templates = [[table_plot_template, 
+                            dtime_table_buttons_template]])
+                #table_for_all_wells_template += dtime_table_buttons_template
 
                 repheads, reprows, reptemps = self.calculate_rep_table()
                 table_for_reps_template =\
@@ -1212,15 +1239,34 @@ class optical_density_block(obs_data_block):
                         widgets = ['table'], 
                         labels = [[repheads, reprows]], 
                         templates = [reptemps])
-                table_for_reps_template +=\
-                    lgm.interface_template_gui(
+                #table_for_reps_template +=\
+                replicate_options = lgm.interface_template_gui(
+                        layout = 'horizontal', 
+                        layouts = ['vertical'], 
                         widgets = ['button_set'], 
                         bindings = [[lgb.create_reset_widgets_wrapper(
                             window, self.recalculate_replicate_doubling), 
                             self.output_html_replicate_table]], 
                         labels = [['Recalculate Replicate Data', 
                             'Output Table as html']])
-                        
+                replicate_options += lgm.interface_template_gui(
+			widgets = ['file_name_box'], 
+			#layout = 'grid', 
+                        #widg_spans = [(1,2)], 
+                        #widg_positions = [(2,0)],
+			keys = [['replicate_doubling_time_html_filename']], 
+			instances = [[self]], 
+                        maximum_sizes = [[(50, 200)]], 
+			initials = [[self.replicate_doubling_time_html_filename, 
+				'Possible Inputs (*.html)', 
+				inpt_dir]], 
+			labels = [['Choose Filename']], 
+			box_labels = ['Replicate Averaged Doubling Time Table Filename'])
+                replicate_options_panel = lgm.interface_template_gui(
+                        widgets = ['panel'], 
+                        templates = [[replicate_options]])
+                table_for_reps_template += replicate_options_panel
+
                 tablepages = [('Raw',[table_for_all_wells_template]), 
                             ('Replicates', [table_for_reps_template])]
 		self.widg_templates.append(
