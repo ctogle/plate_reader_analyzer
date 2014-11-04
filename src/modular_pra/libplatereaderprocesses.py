@@ -111,6 +111,7 @@ class post_process_ratios(post_process_plate_reader):
             else:
                 data[dx].scalars = np.array([div(u,v) for v,u in 
                     zip(pool[dx].scalars,rdomv)], dtype = float)
+        #pdb.set_trace()
         return data
 
     def set_target_settables(self, *args, **kwargs):

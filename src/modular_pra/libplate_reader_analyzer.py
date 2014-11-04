@@ -116,11 +116,11 @@ class obs_data_block(data_block):
 	def __init__(self, *args, **kwargs):
                 self.impose_default('is_OD_block', False, **kwargs)
 		self.impose_default('capture_targets',[],**kwargs)
-		self.impose_default('replicate_reduced',False,**kwargs)
-		self.impose_default('normalized_reduced',False,**kwargs)
-		self.impose_default('timept_filtered',False,**kwargs)
-		self.impose_default('timept_filtered_OD',False,**kwargs)
-		self.impose_default('background_subtracted',False,**kwargs)
+		self.impose_default('replicate_reduced',True,**kwargs)
+		self.impose_default('normalized_reduced',True,**kwargs)
+		self.impose_default('timept_filtered',True,**kwargs)
+		self.impose_default('timept_filtered_OD',True,**kwargs)
+		self.impose_default('background_subtracted',True,**kwargs)
                 self.impose_default('blank_well_filter_std_factor',5,**kwargs)
                 self.impose_default('fake_zero_value',0.000000001,**kwargs)
 		self.impose_default('phase_reduced', False, **kwargs)
@@ -182,12 +182,13 @@ class obs_data_block(data_block):
                     lo = self.OD_threshold_low
                     mi = self.OD_threshold_middle
                     hi = self.OD_threshold_high
-                else: lo,mi,hi = None, None, None
+                    de = self.OD_threshold_deathly
+                else: lo,mi,hi,de = None, None, None, None
                 for wedex, well in enumerate(self._well_key_):
                         self.well_mobjs[well] =\
                             well_data(well, od_data = self.is_OD_block, 
                                 lo_thresh = lo, mi_thresh = mi, hi_thresh = hi, 
-                                parent = self)
+                                de_thresh = de, parent = self)
                 for repdex, rep in enumerate(self._replicate_key_):
                     repwells = []
                     for wekey in self._well_key_:
@@ -275,7 +276,7 @@ class obs_data_block(data_block):
                 self._unreduced_ = lfu.data_container(data = all_data[:])
                 self._all_data_ = all_data
                 #self.data = self._unreduced_
-		self.apply_reductions()
+		#self.apply_reductions()
                 #self._reduced_ = self.apply_reduction(self._unreduced_.data)
 		#self.update_replicate_reduction()
 
@@ -295,6 +296,7 @@ class obs_data_block(data_block):
                 blanks = welkey[-1*rpr:]
                 self._blank_well_key_ = blanks
                 self.blank_well_filter(pra, blanks)
+		self.apply_reductions()
 
         def blank_well_filter(self, pra, blanks):
             # determine if every blank well data point is an outlier
@@ -471,20 +473,24 @@ class obs_data_block(data_block):
             lo_thresh = od_block.OD_threshold_low
             mi_thresh = od_block.OD_threshold_middle
             hi_thresh = od_block.OD_threshold_high
-            lo_dex,mi_dex,hi_dex =\
+            de_thresh = od_block.OD_threshold_deathly
+            lo_dex,mi_dex,hi_dex,hier_dex =\
                 od_block.get_lo_hi_threshold_indexes(
-                    lo_thresh, mi_thresh, hi_thresh)
+                    lo_thresh, mi_thresh, hi_thresh, de_thresh)
             if self.phase_type == 'Lag':
                 start = 0
                 stop = lo_dex
             elif self.phase_type == 'Log':
                 start = lo_dex
                 stop = mi_dex
-            elif self.phase_type == 'Stationary':
+            elif self.phase_type == 'Early Stationary':
                 start = mi_dex
                 stop = hi_dex
-            elif self.phase_type == 'Death':
+            elif self.phase_type == 'Stationary':
                 start = hi_dex
+                stop = hier_dex
+            elif self.phase_type == 'Death':
+                start = hier_dex
                 stop = None
             else:
                 print 'UNKNOWN PHASE TYPE CHOICE', self.phase_type
@@ -560,7 +566,7 @@ class obs_data_block(data_block):
                                 layout = 'horizontal', 
 				widgets = ['check_set', 'radio'], 
 				labels = [['Apply Phase Reduction'], 
-                                    ['Lag', 'Log', 'Stationary', 'Death']], 
+                                    ['Lag', 'Log', 'Early Stationary', 'Stationary', 'Death']], 
 				append_instead = [False, None], 
                                 refresh = [None,[True]], 
                                 window = [None,[window]], 
@@ -677,13 +683,15 @@ class obs_data_block(data_block):
                         widgets = ['spin'], 
                         keys = [['blank_well_filter_std_factor']], 
                         instances = [[self]], 
-                        box_labels = ['Sigma Threshold For Outlier Removal'], 
+                        box_labels = ['Sigma Threshold'], 
+                        #box_labels = ['Sigma Threshold For Outlier Removal'], 
                         doubles = [[True]], 
                         single_steps = [[1.0]], 
                         initials = [[self.blank_well_filter_std_factor]])
                 blnk_well_ids = [we.well_id for we in self.blank_well_mobjs]
                 badfraclabels = [
-                        '% Of Data Identified As Outliers In Well ' + well 
+                        '% Of Outliers In Well ' + well 
+                        #'% Of Data Identified As Outliers In Well ' + well 
                         for well in blnk_well_ids]
                 badfracvalues = [[self.blankwell_outliers[ke]] 
                                     for ke in blnk_well_ids]
@@ -698,7 +706,7 @@ class obs_data_block(data_block):
                     lgm.interface_template_gui(
                         widgets = ['text'], 
                         read_only = [True], 
-                        box_labels = ['% Of Data Removed By Outlier Removal'], 
+                        box_labels = ['% Of Data Removed'], 
                         initials = [[self.tf_f_cutout]])
                 for bft in badfrac_templates: self.widg_templates[-1] += bft
                 #self.widg_templates[-1] += lgm.interface_template_gui(
@@ -779,6 +787,7 @@ class well_data(object):
                 self.lo_thresh = kwargs['lo_thresh']
                 self.mi_thresh = kwargs['mi_thresh']
                 self.hi_thresh = kwargs['hi_thresh']
+                self.de_thresh = kwargs['de_thresh']
 
         def process(self, t):
             self.mean = np.mean(self.data.scalars)
@@ -820,7 +829,7 @@ class well_data(object):
                 sigdatdom = 60.0*sigxrelev
                 self.cufit_data_sig = ldc.scalars(label = 'sigmoid-fit', 
                     scalars = sigdat, domain = sigdatdom, color = 'r',  
-                    override_domain = True)
+                    linestyle = '-', override_domain = True)
                 if self.parent.override_thresholds:
                     sigmoid_2nd_deriv = [
                         abs(lm.calc_2nd_deriv(sigdatdom, sigdat, k)) 
@@ -874,7 +883,8 @@ class well_data(object):
                 poptex, pcovex = cufit(expo, expxrelev, expyrelev)
                 self.cufit_data_exp = ldc.scalars(label = 'expo-fit', 
                     scalars = expo(expxrelev, *poptex), domain = 60.0*expxrelev, 
-                    override_domain = True, color = 'g', linewidth = 1.5)
+                    linestyle = '-', linewidth = 1.5, override_domain = True, 
+                    color = 'g')
             except RuntimeError:
                 print 'runtimeerror: scipy could not fit a curve for well', self.well_id
                 return 0.0, 0.0
@@ -898,6 +908,7 @@ class optical_density_block(obs_data_block):
 		self.impose_default('OD_threshold_low', 0.1)
 		self.impose_default('OD_threshold_middle', 0.6)
 		self.impose_default('OD_threshold_high', 1.0)
+		self.impose_default('OD_threshold_deathly', 0.8)
                 self.impose_default('selected_row',None)
 		self.impose_default('doubling_time_html_filename',
                     'doubling_times.html', **kwargs)
@@ -915,7 +926,7 @@ class optical_density_block(obs_data_block):
             deldex = lodelts.index(min(lodelts))
             return deldex
 
-        def get_lo_hi_threshold_indexes(self, lo, mi, hi, vals = None):
+        def get_lo_hi_threshold_indexes(self, lo, mi, hi, de, vals = None):
             indices = []
             #for da in self.data.data:
             #    vals = da.scalars
@@ -927,23 +938,24 @@ class optical_density_block(obs_data_block):
                     coll = [d.scalars[tdx] for d in daters]
                     me = np.mean(coll)
                     vals.append(me)
-            lodex = self.get_threshold_index(vals, lo)
-            midex = self.get_threshold_index(vals, mi)
-            hidex = self.get_threshold_index(vals, hi)
-            #cond_cnt = len(self._cond_key_)
-            #indices = indices[cond_cnt:]
-            return lodex, midex, hidex
+            lodex = self.get_threshold_index(vals, lo)#end of lag, beginning of log
+            midex = self.get_threshold_index(vals, mi)#end of log, beginning of early stationary
+            hidex = self.get_threshold_index(vals, hi)#end of early stationary, beginning of stationary
+            hierdex = self.get_threshold_index(vals[hidex:], de) + hidex
+            return lodex, midex, hidex, hierdex
 
         def impose_global_thresholds(self):
             wobjs = self.well_mobjs
             glow = self.OD_threshold_low
             gmid = self.OD_threshold_middle
             ghigh = self.OD_threshold_high
+            gdeth = self.OD_threshold_deathly
             for ke in wobjs.keys():
                 wobj = wobjs[ke]
                 wobj.lo_thresh = glow
                 wobj.mi_thresh = gmid
                 wobj.hi_thresh = ghigh
+                wobj.de_thresh = gdeth
             self.recalculate_doubling()
 
 	def recalculate_doubling(self):
@@ -1051,12 +1063,14 @@ class optical_density_block(obs_data_block):
                     'lo_thresh', 
                     'mi_thresh', 
                     'hi_thresh', 
+                    'de_thresh', 
                     'dtime', 
                     'grate']
             heads = ['Well', 
                 'Low OD Cutoff', 
                 'Middle OD Cutoff', 
                 'High OD Cutoff', 
+                'Deathly OD Cutoff', 
                 'Doubling Time', 
                 'Growth Rate']
             finame = self.doubling_time_html_filename
@@ -1114,7 +1128,8 @@ class optical_density_block(obs_data_block):
 			box_labels = ['Doubling Time Table Filename'])
                 wobjs = self.well_mobjs
                 heads = ['Low OD Cutoff', 'Middle OD Cutoff', 
-                    'High OD Cutoff', 'Doubling Time', 'Growth Rate']
+                    'High OD Cutoff', 'Deathly OD Cutoff', 
+                    'Doubling Time', 'Growth Rate']
                 rows = ['Global'] + [we for we in self._well_key_]
                 temps = []
                 for row in rows:
@@ -1161,6 +1176,23 @@ class optical_density_block(obs_data_block):
                             else:
                                 inst = wobjs[row]
                                 key = 'hi_thresh'
+                            rowtemps.append(
+                                lgm.interface_template_gui(
+                                    doubles = [[True]], 
+                                    widgets = ['spin'], 
+                                    single_steps = [[0.01]], 
+                                    instances = [[inst]], 
+                                    keys = [[key]], 
+                                    callbacks = [[self.change_thresh_callback]], 
+                                    initials = [[inst.__dict__[key]]], 
+                                    ))
+                        elif head == 'Deathly OD Cutoff':
+                            if row == 'Global':
+                                inst = self
+                                key = 'OD_threshold_deathly'
+                            else:
+                                inst = wobjs[row]
+                                key = 'de_thresh'
                             rowtemps.append(
                                 lgm.interface_template_gui(
                                     doubles = [[True]], 
