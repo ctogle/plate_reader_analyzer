@@ -1,0 +1,7 @@
+
+*.swp
+*.pyc
+src/build/*
+src/dist/*
+src/modular_plate_reader_pkg.egg-info/*
+

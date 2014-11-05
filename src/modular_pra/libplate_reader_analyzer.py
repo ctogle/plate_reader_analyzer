@@ -189,6 +189,7 @@ class obs_data_block(data_block):
                             well_data(well, od_data = self.is_OD_block, 
                                 lo_thresh = lo, mi_thresh = mi, hi_thresh = hi, 
                                 de_thresh = de, parent = self)
+                time_ = self.cond_mobjs['Time']
                 for repdex, rep in enumerate(self._replicate_key_):
                     repwells = []
                     for wekey in self._well_key_:
@@ -196,7 +197,7 @@ class obs_data_block(data_block):
                             repwells.append(self.well_mobjs[wekey])
                     self.replicate_mobjs[rep] = replicate_data(
                         rep, od_data = self.is_OD_block, 
-                        parent = self, wells = repwells)
+                        parent = self, wells = repwells, time = time_)
 		self._cond_data_ = _cond_data_
 		self._well_data_ = _well_data_
 		read = OrderedDict()
@@ -758,6 +759,7 @@ class replicate_data(object):
         self.replicate_id = args[0]
         self.parent = kwargs['parent']
         self.wells = kwargs['wells']
+        self.time = kwargs['time']
         try: self.significant_figures = kwargs['significant_figures']
         except KeyError: self.significant_figures = 4
         self.is_OD_data = kwargs['od_data']
@@ -768,6 +770,7 @@ class replicate_data(object):
             dtimevals = []
             gratevals = []
             for we in self.wells:
+                we.process(self.time.data)
                 dtimevals.append(we.dtime)
                 gratevals.append(we.grate)
             self.mean_doubling_time = np.round(np.mean(dtimevals), sfigs)
