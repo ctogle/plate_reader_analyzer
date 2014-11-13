@@ -215,8 +215,9 @@ class obs_data_block(data_block):
 			checked = [x for x in unic if not x == '']
 			return checked
 		def ovrflw_check(unic):
-			checked =\
-				['1000000.0' if x.count('OVRFLW') else x for x in unic]
+			checked = [x for x in unic if not x.count('OVRFLW')]
+			#checked =\
+			#	['1000000.0' if x.count('OVRFLW') else x for x in unic]
 			return checked
                 def back_r_swap(unic):
                         checked = [x.replace('\r', '') for x in unic]
@@ -742,6 +743,7 @@ class cond_data(object):
         def process(self):
             self.mean = np.mean(self.data.scalars)
             self.stdv = np.std(self.data.scalars)
+            self.max_value = max(self.data.scalars)
 
 def expo(x,a,b,c):
     exp = a * np.exp(b * x) + c
@@ -769,14 +771,18 @@ class replicate_data(object):
         if self.is_OD_data:
             dtimevals = []
             gratevals = []
+            max_values = []
             for we in self.wells:
                 we.process(self.time.data)
                 dtimevals.append(we.dtime)
                 gratevals.append(we.grate)
+                max_values.append(we.max_value)
+            print len(max_values), 'lemv'
             self.mean_doubling_time = np.round(np.mean(dtimevals), sfigs)
             self.mean_growth_rate = np.round(np.mean(gratevals), sfigs)
             self.stddev_doubling_time = np.round(np.std(dtimevals), sfigs)
             self.stddev_growth_rate = np.round(np.std(gratevals), sfigs)
+            self.mean_max_value = np.round(np.mean(max_values), sfigs)
 
 class well_data(object):
 
@@ -793,8 +799,12 @@ class well_data(object):
                 self.de_thresh = kwargs['de_thresh']
 
         def process(self, t):
+            if len(self.data.scalars) == 0:
+                print 'faulty data!', self.parent.label
+                return
             self.mean = np.mean(self.data.scalars)
             self.stdv = np.std(self.data.scalars)
+            self.max_value = np.max(self.data.scalars)
             if self.is_OD_data:
                 self.dtime, self.grate = self.doubling_time(t.scalars)
                 print 'dtimegrate', self.dtime, self.grate
@@ -986,10 +996,13 @@ class optical_density_block(obs_data_block):
             self.recalculate_individual_doubling(well)
             dtime_txtbox = self.__dict__['_modu_dtime_txtbox_'+well][0]
             grate_txtbox = self.__dict__['_modu_grate_txtbox_'+well][0]
+            mxval_txtbox = self.__dict__['_modu_mxval_txtbox_'+well][0]
             newdtime = self.well_mobjs[well].dtime
             newgrate = self.well_mobjs[well].grate
+            newmxval = self.well_mobjs[well].max_value
             dtime_txtbox.setText(str(newdtime))
             grate_txtbox.setText(str(newgrate))
+            mxval_txtbox.setText(str(newmxval))
             if well == self.selected_row: self.redraw_plot()
 
         def change_table_selection(self, table, rowlabel):
@@ -1025,6 +1038,7 @@ class optical_density_block(obs_data_block):
 
         def calculate_rep_table(self):
             repheads = [
+                'Mean Max Value', 
                 'Mean Doubling Time', 
                 'Mean Growth Rate', 
                 'Stddev Of Doubling Time', 
@@ -1034,11 +1048,16 @@ class optical_density_block(obs_data_block):
             for rdx,ro in enumerate(reprows):
                 replic = self.replicate_mobjs[ro]
                 #reptemps.append([])
+                mmxval = str(replic.mean_max_value)
                 mdtime = str(replic.mean_doubling_time)
                 mgrate = str(replic.mean_growth_rate)
                 stddtime = str(replic.stddev_doubling_time)
                 stdgrate = str(replic.stddev_growth_rate)
                 rotemps = [
+                    lgm.interface_template_gui(
+                        widgets = ['text'], 
+                        read_only = [True], 
+                        initials = [[mmxval]]), 
                     lgm.interface_template_gui(
                         widgets = ['text'], 
                         read_only = [True], 
@@ -1067,6 +1086,7 @@ class optical_density_block(obs_data_block):
                     'mi_thresh', 
                     'hi_thresh', 
                     'de_thresh', 
+                    'max_value', 
                     'dtime', 
                     'grate']
             heads = ['Well', 
@@ -1074,6 +1094,7 @@ class optical_density_block(obs_data_block):
                 'Middle OD Cutoff', 
                 'High OD Cutoff', 
                 'Deathly OD Cutoff', 
+                'Max Value', 
                 'Doubling Time', 
                 'Growth Rate']
             finame = self.doubling_time_html_filename
@@ -1083,11 +1104,13 @@ class optical_density_block(obs_data_block):
             wobjs = [self.replicate_mobjs[ke] for 
                 ke in self._replicate_key_]
             atts = ['replicate_id', 
+                    'mean_max_value', 
                     'mean_doubling_time', 
                     'mean_growth_rate', 
                     'stddev_doubling_time', 
                     'stddev_growth_rate']
             heads = ['Replicate', 
+                'Mean Max Value', 
                 'Mean Doubling Time', 
                 'Mean Growth Rate', 
                 'Stddev Of Doubling Time', 
@@ -1132,7 +1155,7 @@ class optical_density_block(obs_data_block):
                 wobjs = self.well_mobjs
                 heads = ['Low OD Cutoff', 'Middle OD Cutoff', 
                     'High OD Cutoff', 'Deathly OD Cutoff', 
-                    'Doubling Time', 'Growth Rate']
+                    'Doubling Time', 'Growth Rate', 'Max Value']
                 rows = ['Global'] + [we for we in self._well_key_]
                 temps = []
                 for row in rows:
@@ -1230,6 +1253,19 @@ class optical_density_block(obs_data_block):
                                         initials = [[grate]], 
                                         handles = [(self, 
                                             '_modu_grate_txtbox_' + row)], 
+                                        ))
+                            else: rowtemps.append(None)
+                        elif head == 'Max Value':
+                            if not row == 'Global':
+                                wobj = wobjs[row]
+                                mxval = str(wobj.max_value)
+                                rowtemps.append(
+                                    lgm.interface_template_gui(
+                                        widgets = ['text'], 
+                                        read_only = [True], 
+                                        initials = [[mxval]], 
+                                        handles = [(self, 
+                                            '_modu_mxval_txtbox_' + row)], 
                                         ))
                             else: rowtemps.append(None)
                     temps.append(rowtemps)
