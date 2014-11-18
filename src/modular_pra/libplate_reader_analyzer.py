@@ -115,6 +115,7 @@ class obs_data_block(data_block):
 
 	def __init__(self, *args, **kwargs):
                 self.impose_default('is_OD_block', False, **kwargs)
+                self.impose_default('replicate_reduce_via_median',False,**kwargs)
 		self.impose_default('capture_targets',[],**kwargs)
 		self.impose_default('replicate_reduced',True,**kwargs)
 		self.impose_default('normalized_reduced',True,**kwargs)
@@ -396,6 +397,7 @@ class obs_data_block(data_block):
                             bin_min = bin_min, bin_max = bin_max)
                             #bin_basis_override = all_bin_axes)
                     mevals = [np.mean(va) if va else None for va in vals]
+                    mdvals = [np.median(va) if va else None for va in vals]
                     sdvals = [np.std(va) if va else None for va in vals]
                     dbins = [b for b,v in zip(bins,mevals) if not v is None]
                     mevals = [v for v in mevals if not v is None]
@@ -403,10 +405,16 @@ class obs_data_block(data_block):
                     stdu = [v+s for v,s in zip(mevals,sdvals)]
                     stdd = [v-s for v,s in zip(mevals,sdvals)]
                     stds = [stdu, stdd]
+                    
+                    #final_data.append(ldc.scalars(
+                    #    label = dlab, scalars = mevals, 
+                    #    subscalars = stds))#, domain = dbins, 
+                    #    #override_domain = True))
+                    
                     final_data.append(ldc.scalars(
                         label = dlab, scalars = mevals, 
-                        subscalars = stds))#, domain = dbins, 
-                        #override_domain = True))
+                        subscalars = stds, domain = dbins, 
+                        override_domain = True))
                     
             bindat = ldc.scalars(label = 'OD-bins', scalars = bins)
             final_data.insert(0,bindat)
@@ -448,9 +456,12 @@ class obs_data_block(data_block):
                 for da in unred.data:
                     if not da.label in self._well_key_:
                         final_data.append(da)
+                if self.replicate_reduce_via_median:stfunc = np.median
+                else:stfunc = np.mean
                 for re, rep in zip(reps, replicates):
 		    zi = zip(*[r.scalars for r in rep])
-		    repme = np.array([np.mean(z) for z in zi])
+		    repme = np.array([stfunc(z) for z in zi])
+		    #repme = np.array([np.mean(z) for z in zi])
                     stdu = np.array([r + np.std(z) for r,z in zip(repme,zi)])
                     stdd = np.array([r - np.std(z) for r,z in zip(repme,zi)])
                     stds = [stdu, stdd]
@@ -517,8 +528,9 @@ class obs_data_block(data_block):
                 unredlenpost = len(unred.data[0].scalars)
                 self.tf_f_cutout = (unredlen - unredlenpost) / unredtot
             else: self.tf_f_cutout = 0.0
-            if bgs_f:
-                unred = self.apply_background_subtraction(unred)
+
+            if bgs_f:unred = self.apply_background_subtraction(unred)
+
             if phr_f:
                 unredlen = len(unred.data[0].scalars)
                 unred = self.apply_phase_reduction(unred)
@@ -535,6 +547,8 @@ class obs_data_block(data_block):
 
         def apply_reductions(self):
             unred = lfu.data_container(data = dcopy(self._all_data_))
+            #unred = lfu.data_container(data = self._all_data_)
+            # THIS IS PROBABLY WHERE THE MISTAKE HAPPENS
             unred = self.reduce_data(unred, self.timept_filtered_OD, 
                 self.timept_filtered, self.background_subtracted, 
                 self.phase_reduced, self.replicate_reduced, 
@@ -721,14 +735,18 @@ class obs_data_block(data_block):
 			lgm.interface_template_gui(
                                 layout = 'horizontal', 
 				widgets = ['check_set'], 
-				labels = [['Apply Replicate Reduction']], 
+				labels = [['Apply Replicate Reduction', 
+                                    'Use Median Instead of Mean']], 
 				append_instead = [False], 
                                 #refresh = [[True]], 
                                 #window = [[window]], 
-				instances = [[self]], 
-				keys = [['replicate_reduced']], 
+				instances = [[self, self]], 
+				keys = [['replicate_reduced', 
+                                    'replicate_reduce_via_median']], 
 				callbacks = [[lgb.create_reset_widgets_wrapper(
-				    window, self.apply_reductions)]]))
+        				        window, self.apply_reductions),
+                                            lgb.create_reset_widgets_wrapper(
+                                                window, self.apply_reductions)]]))
                 #self.widg_templates[-1] += lgm.interface_template_gui(
                 #        widgets = ['text'], 
                 #        read_only = [True], 
@@ -742,6 +760,7 @@ class cond_data(object):
 
         def process(self):
             self.mean = np.mean(self.data.scalars)
+            self.median = np.median(self.data.scalars)
             self.stdv = np.std(self.data.scalars)
             self.max_value = max(self.data.scalars)
 
@@ -803,11 +822,12 @@ class well_data(object):
                 print 'faulty data!', self.parent.label
                 return
             self.mean = np.mean(self.data.scalars)
+            self.median = np.median(self.data.scalars)
             self.stdv = np.std(self.data.scalars)
             self.max_value = np.max(self.data.scalars)
             if self.is_OD_data:
                 self.dtime, self.grate = self.doubling_time(t.scalars)
-                print 'dtimegrate', self.dtime, self.grate
+                print 'dtimegrate', self.dtime, self.grate, self.max_value
 
         # find the dexes in the sigmoid fit! its monotonic, smooth, 1-1
         def find_threshold_indices(self,lo,mi,hi,vals):
@@ -1118,6 +1138,24 @@ class optical_density_block(obs_data_block):
             finame = self.replicate_doubling_time_html_filename
             lht.create_table(wobjs, atts, heads, finame)
 
+        def breakout_od_plot(self):
+            well = self.selected_row
+            #qplot = self.qplot[0]
+            data = self.get_well_data(well)
+            #ptype = 'lines'
+            #qplot.plot(data,'time','OD',
+            #    'OD of ' + well, ptype = ptype)
+            oput = lo.output_plan(label = 'breakout plot', parent = self)
+            dlabs = [d.label for d in data.data]
+            oput.targeted = dlabs
+	    self.provide_axes_manager_input()
+            oput.output_plt = True
+            oput.output_vtk = False
+            oput.output_txt = False
+            oput.output_csv = False
+            oput(data)
+            print 'want to break out plot for well', well
+
 	def set_settables(self, *args, **kwargs):
 		window = args[0]
 		self.handle_widget_inheritance(*args, **kwargs)
@@ -1127,18 +1165,25 @@ class optical_density_block(obs_data_block):
 		        widgets = ['button_set'], 
                         layouts = ['vertical'], 
 			bindings = [[
+                            self.breakout_od_plot, 
                             self.output_html_od_data_table, 
-                            [lgb.create_reset_widgets_wrapper(
-                                window, self.recalculate_doubling),
-                                    self.redraw_plot], 
-                            [lgb.create_reset_widgets_wrapper(
-                                window, self.impose_global_thresholds), 
-                                    self.redraw_plot]]], 
-			labels = [['Output Table As html', 
+
+                            self.recalculate_doubling,
+                            self.impose_global_thresholds]], 
+
+                            #[lgb.create_reset_widgets_wrapper(
+                            #    window, self.recalculate_doubling),
+                            #        self.redraw_plot], 
+                            #[lgb.create_reset_widgets_wrapper(
+                            #    window, self.impose_global_thresholds), 
+                            #        self.redraw_plot]]], 
+			labels = [['Breakout Plot', 
+                            'Output Table As html', 
                             'Recalculate Doubling Times', 
                             'Impose Global Thresholds']])#)
 		inpt_dir = os.getcwd()
                 #self.widg_templates[-1] +=\
+
                 dtime_table_buttons_template += lgm.interface_template_gui(
 			widgets = ['file_name_box'], 
 			#layout = 'grid', 
@@ -1152,6 +1197,7 @@ class optical_density_block(obs_data_block):
 				inpt_dir]], 
 			labels = [['Choose Filename']], 
 			box_labels = ['Doubling Time Table Filename'])
+
                 wobjs = self.well_mobjs
                 heads = ['Low OD Cutoff', 'Middle OD Cutoff', 
                     'High OD Cutoff', 'Deathly OD Cutoff', 
@@ -1287,11 +1333,14 @@ class optical_density_block(obs_data_block):
                                 callbacks = [[self.change_table_selection]], 
                                 templates = [temps])
                 data = self.get_well_data('A1')
+                #curpage = lambda : pdb.set_trace()
                 table_plot_template +=\
                     lgm.interface_template_gui(
                         widgets = ['plot'], 
                         handles = [(self, 'qplot')], 
+                        #callbacks = [[curpage]], 
                         datas = [data])
+                
                 table_for_all_wells_template +=\
                     lgm.interface_template_gui(
                         #layout = 'vertical', 
